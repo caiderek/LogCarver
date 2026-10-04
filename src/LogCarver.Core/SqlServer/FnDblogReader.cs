@@ -84,6 +84,16 @@ public static class FnDblogReader
             return [];
 
         await using var command = new SqlCommand(Sql, connection);
+        // fn_dblog(NULL, NULL) scans the whole active log, not just this
+        // table's rows - on a database with a large active log this can
+        // genuinely take well over the ADO.NET default 30s (confirmed
+        // 2026-10-04 stress-testing LogCarverGuard's native install: a
+        // 5-table FK cascade's undo generation took 1m46s total across
+        // several of these scans). 30s was timing this out even when the
+        // scan would have completed in well under two minutes - raised so
+        // a genuinely slow-but-finishable scan doesn't get treated the same
+        // as a truly stuck one.
+        command.CommandTimeout = 120;
         command.Parameters.AddWithValue("@allocUnitName", allocUnitName);
 
         var results = new List<LogRecord>();

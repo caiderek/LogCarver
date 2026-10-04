@@ -46,6 +46,9 @@ public static class TransactionScopeReader
         SqlConnection connection, string transactionId, CancellationToken ct = default)
     {
         await using var command = new SqlCommand(Sql, connection);
+        // Same reasoning as FnDblogReader's CommandTimeout bump - this is
+        // also a fn_dblog(NULL, NULL) full-log scan.
+        command.CommandTimeout = 120;
         command.Parameters.AddWithValue("@transactionId", transactionId);
 
         var seen = new HashSet<(string Schema, string Table)>();

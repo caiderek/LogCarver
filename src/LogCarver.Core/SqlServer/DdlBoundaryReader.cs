@@ -78,6 +78,9 @@ public static class DdlBoundaryReader
         foreach (long hobtId in hobtIds)
         {
             await using var command = new SqlCommand(BoundarySql, connection);
+            // Same reasoning as FnDblogReader's CommandTimeout bump - this
+            // query does two fn_dblog(NULL, NULL) full-log scans per hobt_id.
+            command.CommandTimeout = 120;
             command.Parameters.AddWithValue("@rowsetPattern", $"%rowset {hobtId}.%");
 
             await using var reader = await command.ExecuteReaderAsync(ct);
