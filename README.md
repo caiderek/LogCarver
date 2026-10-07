@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/assets/logo.png" width="96" alt="LogCarver logo"></p>
+
 # LogCarver
 
 **English | [繁體中文](README.zh-TW.md)**
