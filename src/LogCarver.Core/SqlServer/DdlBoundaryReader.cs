@@ -41,10 +41,10 @@ public static class DdlBoundaryReader
 
     private const string BoundarySql = """
         SELECT DISTINCT bx.[Current LSN] AS DdlLsn, bx.[Transaction Name] AS TxName, bx.[Transaction ID] AS TxId
-        FROM fn_dblog(NULL, NULL) bx
+        FROM fn_dblog(NULL, @commitLsn) bx
         JOIN (
             SELECT DISTINCT [Transaction ID]
-            FROM fn_dblog(NULL, NULL)
+            FROM fn_dblog(NULL, @commitLsn)
             WHERE [Operation] = 'LOP_HOBT_DDL' AND [Description] LIKE @rowsetPattern
         ) ddl ON ddl.[Transaction ID] = bx.[Transaction ID]
         WHERE bx.[Operation] = 'LOP_BEGIN_XACT'
@@ -52,8 +52,19 @@ public static class DdlBoundaryReader
         """;
 
     /// <param name="tableName">Schema-qualified, e.g. "dbo.LogTest".</param>
+    /// <param name="commitLsn">
+    /// Upper-bounds both scans to this LSN (typically the undo-triggering
+    /// transaction's own commit LSN, already in fn_dblog's real numeric
+    /// input format - see FnDblogReader's doc comment) - a DDL boundary
+    /// after that point can't affect how records up to and including this
+    /// transaction decode. Null means unbounded (the original behavior). No
+    /// lower bound is offered - a schema change from arbitrarily far in the
+    /// past can still be the boundary that makes an old record's layout
+    /// different from today's, same reasoning as FnDblogReader's own doc
+    /// comment.
+    /// </param>
     public static async Task<IReadOnlyList<DdlBoundary>> GetDdlBoundariesAsync(
-        SqlConnection connection, string tableName, CancellationToken ct = default)
+        SqlConnection connection, string tableName, CancellationToken ct = default, string? commitLsn = null)
     {
         IReadOnlyList<long> hobtIds = await GetHobtIdsAsync(connection, tableName, ct);
         if (hobtIds.Count == 0) return [];
@@ -79,9 +90,11 @@ public static class DdlBoundaryReader
         {
             await using var command = new SqlCommand(BoundarySql, connection);
             // Same reasoning as FnDblogReader's CommandTimeout bump - this
-            // query does two fn_dblog(NULL, NULL) full-log scans per hobt_id.
+            // query does two fn_dblog scans per hobt_id, unbounded unless
+            // commitLsn is given.
             command.CommandTimeout = 120;
             command.Parameters.AddWithValue("@rowsetPattern", $"%rowset {hobtId}.%");
+            command.Parameters.AddWithValue("@commitLsn", (object?)commitLsn ?? DBNull.Value);
 
             await using var reader = await command.ExecuteReaderAsync(ct);
             int ordLsn = reader.GetOrdinal("DdlLsn");

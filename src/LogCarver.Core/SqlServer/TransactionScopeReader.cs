@@ -31,25 +31,43 @@ public sealed record TouchedTable(string Schema, string Table, string AllocUnitN
 /// table twice, producing duplicate undo entries - confirmed via a FK
 /// cascade delete where the child table had an index on its FK column (an
 /// entirely ordinary schema choice), not a contrived edge case.
+///
+/// LSN bounding (added 2026-10-08): unlike FnDblogReader, this query only
+/// asks "which AllocUnitNames did THIS transaction's own row events touch" -
+/// it never needs history from before the transaction, so it's safe to
+/// bound BOTH ends to the transaction's own begin/commit LSN. See
+/// FnDblogReader's own doc comment for the full incident this was added to
+/// fix, why FnDblogReader itself can only take an upper bound, and - most
+/// importantly - the real (non-obvious) numeric string format fn_dblog's
+/// parameters actually require.
 /// </summary>
 public static class TransactionScopeReader
 {
     private const string Sql = """
         SELECT DISTINCT [AllocUnitName]
-        FROM fn_dblog(NULL, NULL)
+        FROM fn_dblog(@beginLsn, @commitLsn)
         WHERE [Transaction ID] = @transactionId
           AND [Operation] IN ('LOP_INSERT_ROWS', 'LOP_DELETE_ROWS', 'LOP_MODIFY_ROW', 'LOP_MODIFY_COLUMNS')
           AND [AllocUnitName] IS NOT NULL;
         """;
 
+    /// <param name="beginLsn">
+    /// Lower-bounds the scan to this transaction's own begin LSN, already in
+    /// fn_dblog's real numeric input format (see FnDblogReader's doc
+    /// comment). Null means unbounded - the original behavior.
+    /// </param>
+    /// <param name="commitLsn">Upper-bounds the scan the same way; null means unbounded.</param>
     public static async Task<IReadOnlyList<TouchedTable>> GetTouchedTablesAsync(
-        SqlConnection connection, string transactionId, CancellationToken ct = default)
+        SqlConnection connection, string transactionId, CancellationToken ct = default,
+        string? beginLsn = null, string? commitLsn = null)
     {
         await using var command = new SqlCommand(Sql, connection);
         // Same reasoning as FnDblogReader's CommandTimeout bump - this is
-        // also a fn_dblog(NULL, NULL) full-log scan.
+        // also a fn_dblog scan, unbounded unless beginLsn/commitLsn are given.
         command.CommandTimeout = 120;
         command.Parameters.AddWithValue("@transactionId", transactionId);
+        command.Parameters.AddWithValue("@beginLsn", (object?)beginLsn ?? DBNull.Value);
+        command.Parameters.AddWithValue("@commitLsn", (object?)commitLsn ?? DBNull.Value);
 
         var seen = new HashSet<(string Schema, string Table)>();
         var results = new List<TouchedTable>();

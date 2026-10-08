@@ -55,6 +55,42 @@ namespace LogCarver.Core.SqlServer;
 /// fn_dblog exposes. Recovering data from VLFs that are reusable but not
 /// yet overwritten requires reading the LDF file directly and is not
 /// implemented here.
+///
+/// LSN upper-bounding (added 2026-10-08, see LogCarverGuard's own status
+/// notes for the full incident): a real deployment hit 30+ minutes and
+/// multi-GB memory for a single UPDATE's undo generation because every
+/// fn_dblog call here scanned the database's ENTIRE active log, not just
+/// the range relevant to the one transaction being undone - fn_dblog's
+/// second positional parameter is a perfectly real end-LSN bound, it was
+/// simply never passed. <paramref name="commitLsn"/> lets a caller supply
+/// "don't read past this transaction's own commit" - safe because nothing
+/// at or after a transaction's commit LSN can be part of ITS before/after
+/// image. Deliberately NOT given a lower bound too: an UPDATE's
+/// before-image requires replaying every prior write to the same
+/// page/slot, which can be arbitrarily far back in the log - narrowing
+/// the start would risk silently wrong (not just missing) before-images.
+/// Left null (the default), behavior is unchanged from before this
+/// parameter existed - a full fn_dblog(NULL, NULL) scan.
+///
+/// IMPORTANT - the string fn_dblog itself prints in [Current LSN]
+/// ("AAAAAAAA:BBBBBBBB:CCCC", colon-hex) is NOT what its own start/end
+/// parameters accept, despite that being the format every public example
+/// (blog posts, even a Qlik support article) shows. Passing that format
+/// back in throws SqlException 9005 ("Invalid parameter passed to
+/// OpenRowset(DBLog, ...)") on every SQL Server version tried, including
+/// 2025 - confirmed empirically 2026-10-08 after a first attempt at this
+/// exact feature was built, fully tested, and reverted believing fn_dblog
+/// had stopped accepting bounded calls entirely. It hadn't; the format was
+/// wrong. The real accepted input format (reverse-engineered from
+/// msdb.dbo.backupset's LSN columns, confirmed via a real begin/commit/
+/// scan round-trip) is a single decimal string: VLF sequence number
+/// (decimal, no padding) + log block offset (decimal, zero-padded to 10
+/// digits) + slot number (decimal, zero-padded to 5 digits), e.g.
+/// "8953000002721600001". Callers must pass <paramref name="commitLsn"/>
+/// already converted to this format - see
+/// GuardedSqlExecutor.ConvertHexLsnToNumericFormat, the one place that
+/// conversion happens (right where a hex LSN is first captured from
+/// fn_dblog's own output).
 /// </summary>
 public static class FnDblogReader
 {
@@ -69,15 +105,22 @@ public static class FnDblogReader
                [Offset in Row] AS OffsetInRow, [AllocUnitName] AS AllocUnitName,
                [Page ID] AS PageId, [Slot ID] AS SlotId, [Transaction ID] AS TransactionId,
                [RowLog Contents 0] AS Rlc0, [RowLog Contents 1] AS Rlc1
-        FROM fn_dblog(NULL, NULL)
+        FROM fn_dblog(NULL, @commitLsn)
         WHERE [AllocUnitName] = @allocUnitName
           AND [Context] IN ('LCX_CLUSTERED', 'LCX_MARK_AS_GHOST', 'LCX_HEAP')
         ORDER BY [Current LSN];
         """;
 
     /// <param name="tableName">Schema-qualified, e.g. "dbo.LogTest".</param>
+    /// <param name="commitLsn">
+    /// Upper-bounds the scan to records at or before this LSN (typically the
+    /// undo-triggering transaction's own commit LSN), already converted to
+    /// fn_dblog's real numeric input format - see this class's own doc
+    /// comment. Null means unbounded - the original fn_dblog(NULL, NULL)
+    /// behavior.
+    /// </param>
     public static async Task<IReadOnlyList<LogRecord>> ReadClusteredRecordsAsync(
-        SqlConnection connection, string tableName, CancellationToken ct = default)
+        SqlConnection connection, string tableName, CancellationToken ct = default, string? commitLsn = null)
     {
         string? allocUnitName = await ResolveOwnAllocUnitNameAsync(connection, tableName, ct);
         if (allocUnitName is null)
@@ -91,10 +134,14 @@ public static class FnDblogReader
         // 5-table FK cascade's undo generation took 1m46s total across
         // several of these scans). 30s was timing this out even when the
         // scan would have completed in well under two minutes - raised so
-        // a genuinely slow-but-finishable scan doesn't get treated the same
-        // as a truly stuck one.
+        // a genuinely slow-but-finishable scan doesn't get timeout the same
+        // as a truly stuck one. Passing commitLsn (see this method's own
+        // doc comment) shrinks the scanned range in the first place, so
+        // this timeout is now a backstop for the unbounded/legacy case,
+        // not the expected normal cost.
         command.CommandTimeout = 120;
         command.Parameters.AddWithValue("@allocUnitName", allocUnitName);
+        command.Parameters.AddWithValue("@commitLsn", (object?)commitLsn ?? DBNull.Value);
 
         var results = new List<LogRecord>();
         await using var reader = await command.ExecuteReaderAsync(ct);
