@@ -69,7 +69,7 @@ public static class SchemaReader
         SELECT c.name AS ColName, c.column_id AS ColumnId,
                ipc.leaf_offset AS LeafOffset, ipc.leaf_null_bit AS LeafNullBit,
                ipc.max_length AS MaxLength, ipc.system_type_id AS SystemTypeId,
-               c.scale AS Scale, c.is_identity AS IsIdentity
+               c.scale AS Scale, c.is_identity AS IsIdentity, TYPE_NAME(c.user_type_id) AS TypeName
         FROM sys.system_internals_partition_columns ipc
         JOIN sys.partitions p ON p.partition_id = ipc.partition_id
         JOIN sys.columns c ON c.object_id = p.object_id AND c.column_id = ipc.partition_column_id
@@ -104,7 +104,8 @@ public static class SchemaReader
                 MaxLength: reader.GetInt16(reader.GetOrdinal("MaxLength")),
                 SystemTypeId: reader.GetByte(reader.GetOrdinal("SystemTypeId")),
                 Scale: reader.GetByte(reader.GetOrdinal("Scale")),
-                IsIdentity: reader.GetBoolean(reader.GetOrdinal("IsIdentity")));
+                IsIdentity: reader.GetBoolean(reader.GetOrdinal("IsIdentity")),
+                TypeName: reader.GetString(reader.GetOrdinal("TypeName")));
 
             if (results.TryGetValue(columnId, out var existing))
             {

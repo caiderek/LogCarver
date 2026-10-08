@@ -95,6 +95,15 @@ internal static class SqlStatementBuilder
         {
             null => $"{EscapeIdentifier(kv.Key)} IS NULL",
             DateTime => $"CONVERT(DATETIME2(7), {EscapeIdentifier(kv.Key)}) = {FormatSqlLiteral(kv.Value)}",
+            // geography/geometry reject a plain "=" outright - confirmed
+            // via a direct sqlcmd probe: SQL error 403, "The equal to
+            // operator is not valid for data type geography." .STEquals()
+            // is the documented comparison method for these two types;
+            // hierarchyid (the third type sharing system_type_id 240) DOES
+            // support "=" and isn't special-cased here - only found to be
+            // a problem for geography/geometry specifically, 2026-10-08.
+            SqlClrBinaryValue clr when clr.TypeName is "geography" or "geometry" =>
+                $"{EscapeIdentifier(kv.Key)}.STEquals({FormatSqlLiteral(kv.Value)}) = 1",
             _ => $"{EscapeIdentifier(kv.Key)} = {FormatSqlLiteral(kv.Value)}",
         }));
 
@@ -214,6 +223,30 @@ internal static class SqlStatementBuilder
         // UndoGenerationError - but the underlying gap is still real and
         // worth fixing at the source).
         bool b => b ? "1" : "0",
+        // Same missing-case pattern as every entry above, found 2026-10-08
+        // via an independent cross-check agent's FOURTH testing round
+        // against the live Rocky9 deployment: TINYINT (System.Byte) and
+        // SMALLINT (System.Int16) are both extremely ordinary column types
+        // (flags, status codes, small counters) that had zero undo
+        // capability - caught safely by GuardedSqlExecutor's existing
+        // UndoGenerationError handling, not a crash, but the underlying
+        // gap was real.
+        byte tiny => tiny.ToString(),
+        short small => small.ToString(),
+        // Same round: VARBINARY/BINARY decode to a bare byte[] (see
+        // RowDecoder.DecodeVariableLengthValue's own doc comment for why
+        // this didn't exist before) - SQL Server's 0x-prefixed hex literal
+        // is the standard binary literal form, valid directly in both a
+        // VALUES list and a WHERE clause's plain "=" comparison.
+        byte[] bytes => $"0x{Convert.ToHexString(bytes)}",
+        // CLR UDTs (geography/geometry/hierarchyid - see SqlClrBinaryValue's
+        // own doc comment for why system_type_id alone can't tell them
+        // apart) need an explicit CONVERT back from their binary
+        // serialization - confirmed empirically via a direct sqlcmd probe
+        // that CONVERT(GEOGRAPHY, <same bytes CAST from the type produced>)
+        // round-trips exactly, whereas a bare 0x literal assigned directly
+        // is not a defined conversion for these types.
+        SqlClrBinaryValue clr => $"CONVERT([{clr.TypeName}], 0x{Convert.ToHexString(clr.Bytes)})",
         _ => throw new NotSupportedException($"Cannot format a SQL literal for value of type {value.GetType()}."),
     };
 }

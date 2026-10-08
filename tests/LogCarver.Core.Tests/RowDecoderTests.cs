@@ -779,6 +779,69 @@ public class RowDecoderTests
         Assert.Equal("999999999999999999999999999.9999999999", val.ToString());
     }
 
+    // dbo.CrossCheck_Blob2: Id INT IDENTITY, Blob VARBINARY(MAX) - real
+    // capture from an independent cross-check agent's fourth testing round,
+    // 2026-10-08: every variable-length column used to decode as text
+    // unconditionally (see RowDecoder.DecodeVariableLengthValue's own doc
+    // comment), so VARBINARY's raw bytes came out as garbled Windows-1252
+    // text instead of a byte[] - undo SQL built from it could never
+    // actually execute.
+    private static readonly IReadOnlyList<ColumnSchema> VarBinarySchema =
+    [
+        new ColumnSchema("Id", 1, LeafOffset: 4, LeafNullBit: 1, MaxLength: 4, SystemTypeId: 56),
+        new ColumnSchema("Blob", 2, LeafOffset: -1, LeafNullBit: 2, MaxLength: -1, SystemTypeId: 165, TypeName: "varbinary"),
+    ];
+
+    [Fact]
+    public void Decode_VarBinary_DecodesAsRawBytes_NotText()
+    {
+        byte[] row = Convert.FromHexString("3000080001000000020000010015000102030405ff");
+
+        var result = RowDecoder.Decode(row, VarBinarySchema);
+
+        Assert.Equal(1, result["Id"]);
+        Assert.Equal(new byte[] { 0x01, 0x02, 0x03, 0x04, 0x05, 0xFF }, result["Blob"]);
+    }
+
+    // dbo.CrossCheck_Geo: Id INT, Loc GEOGRAPHY - same round. sys.columns
+    // reports system_type_id 240 (SQL Server's generic "CLR user-defined
+    // type" marker - geography/geometry/hierarchyid all share it) for this
+    // column, but SchemaReader's own query reads SystemTypeId from
+    // sys.system_internals_partition_columns, which - confirmed via a
+    // direct comparison against a real geography column - collapses CLR
+    // UDTs down to 165 ("varbinary"), the SAME value a real VARBINARY
+    // column reports. 165 here matches what SchemaReader would actually
+    // produce for this column, not sys.columns' own 240 - TYPE_NAME(user_
+    // type_id) is what actually distinguishes it from plain varbinary (see
+    // ColumnSchema.TypeName's own doc comment). On-disk bytes are exactly
+    // the type's own binary serialization (confirmed via a direct
+    // CAST(... AS VARBINARY(MAX)) comparison against a real
+    // geography::Point value - byte-for-byte identical to what fn_dblog
+    // captured here).
+    private static readonly IReadOnlyList<ColumnSchema> GeographySchema =
+    [
+        new ColumnSchema("Id", 1, LeafOffset: 4, LeafNullBit: 1, MaxLength: 4, SystemTypeId: 56),
+        new ColumnSchema("Loc", 2, LeafOffset: -1, LeafNullBit: 2, MaxLength: -1, SystemTypeId: 165, TypeName: "geography"),
+    ];
+
+    [Fact]
+    public void Decode_Geography_DecodesAsTaggedClrBinaryValue_NotText()
+    {
+        // Real captured row for INSERT INTO dbo.CrossCheck_Geo (Id, Loc)
+        // VALUES (1, geography::Point(25.03, 121.56, 4326)).
+        byte[] row = Convert.FromHexString(
+            "300008000100000002000001002500e6100000010c48e17a14ae073940a4703d0ad7635e40");
+
+        var result = RowDecoder.Decode(row, GeographySchema);
+
+        Assert.Equal(1, result["Id"]);
+        var loc = Assert.IsType<SqlClrBinaryValue>(result["Loc"]);
+        Assert.Equal("geography", loc.TypeName);
+        Assert.Equal(
+            Convert.FromHexString("e6100000010c48e17a14ae073940a4703d0ad7635e40"),
+            loc.Bytes);
+    }
+
     [Fact]
     public void NonUniqueClusteredIndex_ReservedSlotShiftsRealColumns_StillDecodesCorrectly()
     {

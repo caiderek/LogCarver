@@ -80,6 +80,8 @@ public static class RowDecoder
     private const int TypeSmallDateTime = 58;
     private const int TypeFloat = 62;
     private const int TypeReal = 59;
+    private const int TypeVarBinary = 165;
+    private const int TypeBinary = 173;
 
     /// <summary>
     /// Decodes a row, first refusing (via <see cref="SchemaDriftException"/>)
@@ -410,8 +412,8 @@ public static class RowDecoder
                         result[col.Name] = isNull
                             ? null
                             : len > 0
-                                ? DecodeVarCharBytes(row.Slice(prevEnd, len), col.SystemTypeId)
-                                : string.Empty; // len==0 and not null = legitimate empty string, not NULL
+                                ? DecodeVariableLengthValue(row.Slice(prevEnd, len), col)
+                                : DefaultEmptyVariableLengthValue(col); // len==0 and not null = legitimate empty value, not NULL
                         if (!isNull) FlagIfOverlapping(col.Name, prevEnd, len);
                     }
                 }
@@ -657,4 +659,49 @@ public static class RowDecoder
         systemTypeId == TypeNVarChar
             ? Encoding.Unicode.GetString(bytes)
             : Windows1252GetString(bytes);
+
+    /// <summary>
+    /// Dispatches a variable-length column's raw bytes by its REAL type,
+    /// not just "always text" - found for real 2026-10-08 via an
+    /// independent cross-check agent hitting a VARBINARY(MAX) column:
+    /// every variable-length column used to go through
+    /// <see cref="DecodeVarCharBytes"/> unconditionally, so a VARBINARY or
+    /// GEOGRAPHY/GEOMETRY column's raw bytes got decoded as (garbled)
+    /// Windows-1252 text - the resulting string round-tripped fine through
+    /// FormatSqlLiteral (it's a valid, if nonsensical, NVARCHAR literal),
+    /// so this never crashed or warned; it just produced undo SQL that
+    /// could never actually execute (SQL Server refuses the implicit
+    /// string-to-binary/-to-geography conversion at restore time).
+    ///
+    /// Detection is by <see cref="ColumnSchema.TypeName"/>, NOT by
+    /// SystemTypeId==240 (the generic "CLR user-defined type" marker
+    /// sys.columns.system_type_id reports for geography/geometry/
+    /// hierarchyid): confirmed empirically that
+    /// sys.system_internals_partition_columns (what SchemaReader's own
+    /// query actually reads SystemTypeId from) collapses every CLR UDT
+    /// down to the SAME value (165, "varbinary") a real VARBINARY column
+    /// also reports - a first implementation that branched on
+    /// SystemTypeId==240 never fired for a real geography column as a
+    /// result (silently fell through to the plain-byte[] case, decoding
+    /// correctly but losing the "needs CONVERT+STEquals" tag entirely).
+    /// TypeName comes from sys.columns.user_type_id instead, which this
+    /// collapsing doesn't affect.
+    /// </summary>
+    private static object DecodeVariableLengthValue(ReadOnlySpan<byte> bytes, ColumnSchema col)
+    {
+        if (col.SystemTypeId is not (TypeVarBinary or TypeBinary))
+            return DecodeVarCharBytes(bytes, col.SystemTypeId);
+        return col.TypeName is "varbinary" or "binary" or null
+            ? bytes.ToArray()
+            : new SqlClrBinaryValue(bytes.ToArray(), col.TypeName);
+    }
+
+    private static object DefaultEmptyVariableLengthValue(ColumnSchema col)
+    {
+        if (col.SystemTypeId is not (TypeVarBinary or TypeBinary))
+            return string.Empty;
+        return col.TypeName is "varbinary" or "binary" or null
+            ? Array.Empty<byte>()
+            : new SqlClrBinaryValue([], col.TypeName);
+    }
 }

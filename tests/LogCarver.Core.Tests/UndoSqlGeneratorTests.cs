@@ -305,4 +305,57 @@ public class UndoSqlGeneratorTests
 
         Assert.Equal("DELETE FROM [dbo].[Orders] WHERE [Id] = 1 AND [Price] = -123456789012345.1234567891;", sql);
     }
+
+    [Fact]
+    public void TinyIntAndSmallIntValues_FormatAsPlainIntegerLiterals()
+    {
+        // Same missing-case pattern, found 2026-10-08 via an independent
+        // cross-check agent's FOURTH testing round against the live Rocky9
+        // deployment: TINYINT (System.Byte) and SMALLINT (System.Int16)
+        // are both extremely ordinary column types that had zero undo
+        // capability.
+        var row = new Dictionary<string, object?> { ["Id"] = 1, ["Tiny"] = (byte)5, ["Small"] = (short)-32768 };
+        var evt = new RowEvent("lsn1", RowEventKind.Insert, null, row, null, null, "0001:0F", 1);
+
+        var sql = UndoSqlGenerator.Generate(evt, "dbo.Orders");
+
+        Assert.Equal("DELETE FROM [dbo].[Orders] WHERE [Id] = 1 AND [Tiny] = 5 AND [Small] = -32768;", sql);
+    }
+
+    [Fact]
+    public void VarBinaryValue_FormatsAsAHexLiteral()
+    {
+        // Same round: VARBINARY used to decode (and therefore format) as
+        // garbled text - see RowDecoder.DecodeVariableLengthValue's own
+        // doc comment. A 0x-prefixed hex literal is the standard SQL
+        // Server binary literal form.
+        var row = new Dictionary<string, object?> { ["Id"] = 1, ["Blob"] = new byte[] { 0x01, 0x02, 0xFF } };
+        var evt = new RowEvent("lsn1", RowEventKind.Insert, null, row, null, null, "0001:0F", 1);
+
+        var sql = UndoSqlGenerator.Generate(evt, "dbo.Orders");
+
+        Assert.Equal("DELETE FROM [dbo].[Orders] WHERE [Id] = 1 AND [Blob] = 0x0102FF;", sql);
+    }
+
+    [Fact]
+    public void GeographyValue_FormatsAsAConvertLiteral_AndMatchesViaSTEquals()
+    {
+        // Same round: geography/geometry/hierarchyid all report
+        // system_type_id 240 (see ColumnSchema.TypeName's own doc
+        // comment) and need an explicit CONVERT back from their binary
+        // serialization - confirmed empirically that a bare 0x literal
+        // isn't a defined conversion for these types. geography/geometry
+        // specifically also reject a plain "=" outright (SQL error 403),
+        // so the WHERE clause uses .STEquals() instead - confirmed via a
+        // direct sqlcmd probe.
+        var clr = new SqlClrBinaryValue(Convert.FromHexString("e6100000010c48e17a14ae073940a4703d0ad7635e40"), "geography");
+        var row = new Dictionary<string, object?> { ["Id"] = 1, ["Loc"] = clr };
+        var evt = new RowEvent("lsn1", RowEventKind.Insert, null, row, null, null, "0001:0F", 1);
+
+        var sql = UndoSqlGenerator.Generate(evt, "dbo.Orders");
+
+        Assert.Equal(
+            "DELETE FROM [dbo].[Orders] WHERE [Id] = 1 AND [Loc].STEquals(CONVERT([geography], 0xE6100000010C48E17A14AE073940A4703D0AD7635E40)) = 1;",
+            sql);
+    }
 }
