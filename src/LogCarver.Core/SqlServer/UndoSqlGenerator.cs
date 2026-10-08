@@ -23,6 +23,20 @@ public static class UndoSqlGenerator
     /// the original value instead of getting a new one assigned).
     /// </param>
     /// <returns>The undo statement, or null if the event has no usable before/after image to work from (e.g. refused by the schema-drift guard).</returns>
+    /// <remarks>
+    /// Deliberately does NOT check <see cref="RowEvent.NeedsManualReview"/> -
+    /// this is output for a human to review before running (see this
+    /// class's own doc comment), and the CLI's existing "print a NEEDS
+    /// MANUAL REVIEW comment above the SQL, let the human judge it" design
+    /// already handles that review. An AUTOMATED caller (LogCarverGuard's
+    /// restore_audit_record, which has no human in the loop at all) must
+    /// not reuse this best-effort text as-is - see
+    /// TransactionUndoAssembler.ProcessTableAsync in LogCarverGuard.Core,
+    /// which is where that stricter refusal actually belongs (found for
+    /// real 2026-10-08: an automated caller blindly executing this exact
+    /// kind of best-effort SQL overwrote a column's real ~4000-character
+    /// content with a 28-character placeholder and reported success).
+    /// </remarks>
     public static string? Generate(RowEvent evt, string tableName, string? identityColumnName = null) => evt.Kind switch
     {
         RowEventKind.Insert when evt.After is not null => SqlStatementBuilder.BuildDelete(evt.After, tableName),

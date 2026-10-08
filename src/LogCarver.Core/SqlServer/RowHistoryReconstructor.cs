@@ -185,10 +185,21 @@ public static class RowHistoryReconstructor
                             break;
                         }
 
-                        var beforeDecoded = TryDecode(before.Bytes, schema, before.WrittenAtLsn, ddlBoundaryLsns, [], out var beforeNote, out _);
-                        var afterDecoded = TryDecode(afterBytes, schema, record.Lsn, ddlBoundaryLsns, [], out var afterNote, out _);
+                        var beforeDecoded = TryDecode(before.Bytes, schema, before.WrittenAtLsn, ddlBoundaryLsns, [], out var beforeNote, out var beforeCorruptedColumns);
+                        var afterDecoded = TryDecode(afterBytes, schema, record.Lsn, ddlBoundaryLsns, [], out var afterNote, out var afterCorruptedColumns);
                         bool possiblyCorrupted = before.PossiblyCorrupted || recordTouchedABoundary;
-                        string? note = WithNote(beforeNote ?? afterNote, possiblyCorrupted ? UpdateCorruptionNote : null);
+                        // Real bug, found 2026-10-08 via an integration test
+                        // for the off-row/LOB fix below: this branch used to
+                        // discard both decodes' possiblyCorruptedColumns with
+                        // `out _`, so an off-row column (or any other
+                        // possiblyCorruptedColumns case) on an UPDATE never
+                        // reached Note/NeedsManualReview at all - only
+                        // INSERT/DELETE (above) ever built this note. Column
+                        // names are deduplicated since Before and After
+                        // commonly flag the same column.
+                        var combinedCorruptedColumns = beforeCorruptedColumns.Concat(afterCorruptedColumns).Distinct().ToList();
+                        string? columnCorruptionNote = combinedCorruptedColumns.Count > 0 ? BuildColumnCorruptionNote(combinedCorruptedColumns) : null;
+                        string? note = WithNote(WithNote(beforeNote ?? afterNote, columnCorruptionNote), possiblyCorrupted ? UpdateCorruptionNote : null);
                         events.Add(new RowEvent(record.Lsn, RowEventKind.Update, beforeDecoded, afterDecoded, note, TimestampOf(record), record.PageId, record.SlotId.Value, record.TransactionId));
                         state[key] = (afterBytes, record.Lsn, possiblyCorrupted);
                         break;

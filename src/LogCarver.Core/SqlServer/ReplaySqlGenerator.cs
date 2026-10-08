@@ -17,6 +17,10 @@ public static class ReplaySqlGenerator
     /// SqlStatementBuilder's own doc comment for why this matters.
     /// </param>
     /// <returns>The replay statement, or null if the event has no usable before/after image to work from (e.g. refused by the schema-drift guard).</returns>
+    /// <remarks>
+    /// Deliberately does not check <see cref="RowEvent.NeedsManualReview"/> -
+    /// see UndoSqlGenerator's own doc comment, mirrored here.
+    /// </remarks>
     public static string? Generate(RowEvent evt, string tableName, string? identityColumnName = null) => evt.Kind switch
     {
         RowEventKind.Insert when evt.After is not null => SqlStatementBuilder.BuildInsert(evt.After, tableName, identityColumnName),

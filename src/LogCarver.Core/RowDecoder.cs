@@ -368,6 +368,28 @@ public static class RowDecoder
                         // value) or omits/zero-lengths its own offset-array
                         // entry via the ordinary null-bitmap path below,
                         // verified against real captured INSERT/UPDATE rows.
+                        //
+                        // Flagged as possibly-corrupted too (found missing
+                        // for real 2026-10-08, via an independent cross-
+                        // check agent): this placeholder string is meant to
+                        // be caught by a HUMAN reviewing generated --undo/
+                        // --export SQL text before running it (see
+                        // UndoSqlGenerator's own doc comment - "LogCarver
+                        // never executes anything itself"). LogCarverGuard's
+                        // restore_audit_record has no human in the loop at
+                        // all, so without this flag it silently executed an
+                        // UPDATE/INSERT embedding this literal placeholder
+                        // text as if it were real data, overwriting the
+                        // column's actual ~4000-character content with the
+                        // 28-character string "<off-row value, not
+                        // decoded>" and reporting RESTORED - worse than
+                        // simply failing to restore, actual data loss.
+                        // Flagging it here makes UndoSqlGenerator refuse to
+                        // generate undo for the whole row (see its own doc
+                        // comment), matching the already-existing out-of-
+                        // bounds case two branches below, which already did
+                        // this correctly.
+                        (possiblyCorruptedColumns ??= []).Add(col.Name);
                         result[col.Name] = "<off-row value, not decoded>";
                     }
                     else if (prevEnd > row.Length || endOffset > row.Length)
@@ -575,22 +597,36 @@ public static class RowDecoder
     /// 1-4 little-endian uint32 "digit groups", least-significant group
     /// first, combined as one big base-2^32 integer. The actual value is
     /// that integer divided by 10^Scale.
+    ///
+    /// 4-group (17-byte, precision 29-38) case (verified for real
+    /// 2026-10-08 the same way - real captured fn_dblog bytes for both a
+    /// large positive and a large negative DECIMAL(38,10) value, group
+    /// count and sign-byte convention both confirmed identical to the
+    /// 1-3 group case): returns <see cref="HighPrecisionDecimal"/> instead
+    /// of <see cref="decimal"/> here, since a 128-bit magnitude doesn't
+    /// fit System.Decimal's 96-bit one - see that type's own doc comment.
     /// </summary>
-    private static decimal DecodeDecimal(ReadOnlySpan<byte> row, int offset, int length, int scale)
+    private static object DecodeDecimal(ReadOnlySpan<byte> row, int offset, int length, int scale)
     {
         int groupCount = (length - 1) / 4;
-        if (length != 1 + groupCount * 4 || groupCount is < 1 or > 3)
+        if (length != 1 + groupCount * 4 || groupCount is < 1 or > 4)
         {
-            // groupCount==4 (17-byte storage, precision 29-38) needs a
-            // 128-bit magnitude, which does not fit System.Decimal's
-            // 96-bit mantissa in general - refuse rather than truncate or
-            // overflow silently. Not validated against real data at any
-            // length outside 1-3 groups (precision 1-28).
             throw new NotSupportedException(
-                $"DECIMAL/NUMERIC storage length {length} is not supported (precision outside 1-28); refusing to decode.");
+                $"DECIMAL/NUMERIC storage length {length} is not supported (precision outside 1-38); refusing to decode.");
         }
 
         bool positive = row[offset] != 0;
+
+        if (groupCount == 4)
+        {
+            // BigInteger's own byte-array constructor expects little-endian
+            // bytes with an explicit sign; feeding it the raw 16-byte LE
+            // magnitude directly (as unsigned) and applying the sign
+            // afterward avoids hand-rolling base-2^32 group combination.
+            var magnitude = new System.Numerics.BigInteger(row.Slice(offset + 1, 16), isUnsigned: true, isBigEndian: false);
+            return new HighPrecisionDecimal(positive ? magnitude : -magnitude, scale);
+        }
+
         Span<int> groups = stackalloc int[3];
         for (int i = 0; i < groupCount; i++)
             groups[i] = (int)BitConverter.ToUInt32(row.Slice(offset + 1 + i * 4, 4));

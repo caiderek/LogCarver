@@ -338,6 +338,24 @@ public class RowDecoderTests
     }
 
     [Fact]
+    public void Decode_OffRowLobColumn_IsFlaggedAsPossiblyCorrupted()
+    {
+        // Same real captured row as Decode_OffRowLobColumn_IsMarkedNotDecoded_OtherColumnsUnaffected.
+        // Real bug, found 2026-10-08 via an independent cross-check agent:
+        // this flagging was missing for the off-row case even though the
+        // adjacent out-of-bounds case already did it - see RowDecoder's own
+        // doc comment and TransactionUndoAssembler.ProcessTableAsync, the
+        // automated caller that actually depends on this flag existing to
+        // avoid executing the placeholder text as if it were real data.
+        byte[] row = Convert.FromHexString(
+            "30000800010000000200BC01001F8000009165000000008802000001000000");
+
+        RowDecoder.Decode(row, LobOffRowSchema, [], out var possiblyCorruptedColumns);
+
+        Assert.Contains("Note", possiblyCorruptedColumns);
+    }
+
+    [Fact]
     public void Decode_OffRowLobColumn_NotLastVariableColumn_ChainsOffsetCorrectly()
     {
         // Real captured row for INSERT INTO dbo.LobNotLastTest (Note, Tag)
@@ -715,6 +733,50 @@ public class RowDecoderTests
         Assert.Equal(new DateTime(2026, 5, 17, 13, 45, 0), result["SmallDateTimeCol"]);
         Assert.Equal(3.14159265358979, (double)result["FloatCol"]!, 1e-12);
         Assert.Equal(2.71828f, (float)result["RealCol"]!, 1e-5f);
+    }
+
+    // dbo.DecPrecisionProbe: Id INT, Val DECIMAL(38,10) - 17-byte storage
+    // (precision 29-38, 4 base-2^32 groups), the one precision bucket
+    // DecodeDecimal used to refuse outright (its 128-bit magnitude doesn't
+    // fit System.Decimal's 96-bit one). Found missing for real 2026-10-08
+    // via an independent cross-check agent hitting a real DECIMAL(38,10)
+    // column - undo generation was silently unavailable for it.
+    private static readonly IReadOnlyList<ColumnSchema> DecPrecisionSchema =
+    [
+        new ColumnSchema("Id", 1, LeafOffset: 4, LeafNullBit: 1, MaxLength: 4, SystemTypeId: 56),
+        new ColumnSchema("Val", 2, LeafOffset: 8, LeafNullBit: 2, MaxLength: 17, SystemTypeId: 106, Scale: 10),
+    ];
+
+    [Fact]
+    public void Decode_Decimal38Precision_UsesBigIntegerNotSystemDecimal()
+    {
+        // Captured from fn_dblog against a real SQL Server 2025 instance -
+        // a negative value right at the edge of what System.Decimal's own
+        // 96-bit mantissa could have held, hand-verified group-by-group
+        // (same base-2^32, least-significant-group-first, sign-byte
+        // convention already established for the 1-3 group case) before
+        // being used here as a regression baseline.
+        byte[] row = Convert.FromHexString("100019000100000000d3c6d0f242a6360f6e05010000000000020000");
+
+        var result = RowDecoder.Decode(row, DecPrecisionSchema);
+
+        Assert.Equal(1, result["Id"]);
+        var val = Assert.IsType<HighPrecisionDecimal>(result["Val"]);
+        Assert.Equal("-123456789012345.1234567891", val.ToString());
+    }
+
+    [Fact]
+    public void Decode_Decimal38Precision_PositiveNearMaxValue()
+    {
+        // Sibling capture, same table: a positive value near the actual
+        // maximum DECIMAL(38,10) can hold (28 nines before the point).
+        byte[] row = Convert.FromHexString("100019000200000001ffffffff9f36f400d946dad510ee8507020000");
+
+        var result = RowDecoder.Decode(row, DecPrecisionSchema);
+
+        Assert.Equal(2, result["Id"]);
+        var val = Assert.IsType<HighPrecisionDecimal>(result["Val"]);
+        Assert.Equal("999999999999999999999999999.9999999999", val.ToString());
     }
 
     [Fact]

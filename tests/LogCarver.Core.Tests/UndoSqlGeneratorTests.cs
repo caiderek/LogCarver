@@ -1,3 +1,4 @@
+using LogCarver.Core;
 using LogCarver.Core.SqlServer;
 using Xunit;
 
@@ -263,5 +264,45 @@ public class UndoSqlGeneratorTests
         Assert.Equal(
             "INSERT INTO [dbo].[Orders] ([Id], [Note], [Amount]) VALUES (5, N'gone', 100);",
             UndoSqlGenerator.Generate(deleteEvt, "dbo.Orders"));
+    }
+
+    [Fact]
+    public void GuidValue_FormatsAsAQuotedString()
+    {
+        // Same missing-case pattern as bigint/decimal/bool before it: found
+        // 2026-10-08 via an independent cross-check agent hitting a GUID
+        // primary key (an entirely ordinary schema choice) - undo
+        // generation crashed with NotSupportedException, degrading safely
+        // (caught further up the stack, same as the bool gap) but leaving
+        // GUID-keyed tables with zero undo capability. SQL Server accepts
+        // a UNIQUEIDENTIFIER literal as a plain quoted string in its
+        // canonical form.
+        var guid = new Guid("12345678-90ab-cdef-1234-567890abcdef");
+        var row = new Dictionary<string, object?> { ["Id"] = guid, ["Note"] = "hello" };
+        var evt = new RowEvent("lsn1", RowEventKind.Insert, null, row, null, null, "0001:0F", 1);
+
+        var sql = UndoSqlGenerator.Generate(evt, "dbo.Orders");
+
+        Assert.Equal("DELETE FROM [dbo].[Orders] WHERE [Id] = '12345678-90ab-cdef-1234-567890abcdef' AND [Note] = N'hello';", sql);
+    }
+
+    [Fact]
+    public void HighPrecisionDecimalValue_FormatsAsAPlainDecimalLiteral()
+    {
+        // Same missing-case pattern, found the same session: a
+        // DECIMAL(38,10) column (precision outside System.Decimal's own
+        // ~28-29 digit ceiling) used to be refused at the DECODE level
+        // entirely (RowDecoder's own, deliberate "doesn't fit, refuse
+        // rather than guess" design - see HighPrecisionDecimal's own doc
+        // comment for why BigInteger, which has no such ceiling, fixes
+        // this for real instead of needing a bigger workaround).
+        var hp = new HighPrecisionDecimal(
+            System.Numerics.BigInteger.Parse("-1234567890123451234567891"), Scale: 10);
+        var row = new Dictionary<string, object?> { ["Id"] = 1, ["Price"] = hp };
+        var evt = new RowEvent("lsn1", RowEventKind.Insert, null, row, null, null, "0001:0F", 1);
+
+        var sql = UndoSqlGenerator.Generate(evt, "dbo.Orders");
+
+        Assert.Equal("DELETE FROM [dbo].[Orders] WHERE [Id] = 1 AND [Price] = -123456789012345.1234567891;", sql);
     }
 }

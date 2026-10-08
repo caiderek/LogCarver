@@ -1,3 +1,5 @@
+using LogCarver.Core;
+
 namespace LogCarver.Core.SqlServer;
 
 /// <summary>
@@ -181,7 +183,28 @@ internal static class SqlStatementBuilder
         // SQL literal for value of type System.Decimal" - every other
         // column in every other row was lost too, not just this value.
         decimal m => m.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        // HighPrecisionDecimal.ToString() already produces a plain decimal
+        // literal (no scientific notation) - see that type's own doc
+        // comment for why DECIMAL(29-38 digits) needs it instead of
+        // System.Decimal. Added alongside the DecodeDecimal 4-group case -
+        // missed here until an independent cross-check agent hit a real
+        // DECIMAL(38,10) column 2026-10-08 and got the same
+        // NotSupportedException class as every other missing-case gap
+        // above, just one level removed (RowDecoder itself had already
+        // been refusing to decode this precision range at all before that
+        // same session's fix - see RowDecoder's own doc comment).
+        HighPrecisionDecimal hp => hp.ToString(),
         string s => $"N'{s.Replace("'", "''")}'",
+        // SQL Server accepts a UNIQUEIDENTIFIER literal as a plain quoted
+        // string in its canonical "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+        // form, which Guid.ToString()'s default format already produces.
+        // Same missing-case pattern as every entry above: found 2026-10-08
+        // via an independent cross-check agent hitting a GUID primary key
+        // (an entirely ordinary schema choice) - this one degraded safely
+        // (caught by GuardedSqlExecutor's existing UndoGenerationError
+        // handling, not a crash), but the underlying gap meant GUID-keyed
+        // tables had zero undo capability, full stop.
+        Guid g => $"'{g}'",
         // T-SQL has no boolean literal - BIT columns are written/compared
         // as 1/0. Same missing-case pattern as bigint/decimal above: found
         // 2026-10-02 via LogCarverGuard stress testing against a BIT
