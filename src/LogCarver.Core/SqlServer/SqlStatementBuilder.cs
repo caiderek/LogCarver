@@ -5,14 +5,42 @@ namespace LogCarver.Core.SqlServer;
 /// are mirror images of each other (undo: after -&gt; before, replay:
 /// before -&gt; after), so the statement-building and literal-formatting
 /// logic lives here once instead of twice.
+///
+/// IDENTITY columns (found for real 2026-10-08, via an independent
+/// cross-check agent testing LogCarverGuard against a table using SQL
+/// Server's ordinary default IDENTITY-PK pattern - every one of this
+/// project's own test fixtures up to that point happened to use an
+/// explicitly-assigned PK instead, so this was invisible until an outside
+/// tester hit it on the very first try): SQL Server rejects outright any
+/// UPDATE that tries to SET an identity column, even to its own current
+/// value (error 8102) - and separately rejects an INSERT that names an
+/// identity column in its column list unless IDENTITY_INSERT is ON for
+/// that table. <paramref name="identityColumnName"/> on BuildUpdate/
+/// BuildInsert below handles each: an UPDATE never needs to touch it at
+/// all (a row's own identity value can never actually change, so omitting
+/// it from SET loses nothing), while re-INSERTing a deleted row (undoing
+/// a DELETE) genuinely needs its original identity value restored, which
+/// requires the IDENTITY_INSERT wrap.
 /// </summary>
 internal static class SqlStatementBuilder
 {
-    public static string BuildInsert(IReadOnlyDictionary<string, object?> values, string tableName)
+    /// <param name="identityColumnName">
+    /// The table's identity column, if it has one and it's present in
+    /// <paramref name="values"/>, else null. When given, the INSERT is
+    /// wrapped in SET IDENTITY_INSERT ON/OFF so the original value can be
+    /// restored exactly, instead of SQL Server silently generating a new
+    /// one (or rejecting the statement outright) - see this class's own
+    /// doc comment.
+    /// </param>
+    public static string BuildInsert(IReadOnlyDictionary<string, object?> values, string tableName, string? identityColumnName = null)
     {
         string columns = string.Join(", ", values.Keys.Select(EscapeIdentifier));
         string literals = string.Join(", ", values.Values.Select(FormatSqlLiteral));
-        return $"INSERT INTO {EscapeIdentifier(tableName)} ({columns}) VALUES ({literals});";
+        string escapedTable = EscapeIdentifier(tableName);
+        string insert = $"INSERT INTO {escapedTable} ({columns}) VALUES ({literals});";
+        return identityColumnName is not null && values.ContainsKey(identityColumnName)
+            ? $"SET IDENTITY_INSERT {escapedTable} ON; {insert} SET IDENTITY_INSERT {escapedTable} OFF;"
+            : insert;
     }
 
     public static string BuildDelete(IReadOnlyDictionary<string, object?> matchValues, string tableName) =>
@@ -26,10 +54,19 @@ internal static class SqlStatementBuilder
     /// from this state, the WHERE won't match and the statement becomes a
     /// safe no-op instead of silently overwriting it.
     /// </param>
+    /// <param name="identityColumnName">
+    /// The table's identity column, if it has one, else null. Excluded
+    /// from the SET clause entirely (never from WHERE, where matching on
+    /// it is still valid) - see this class's own doc comment for why an
+    /// UPDATE never needs to, and in fact cannot, touch this column.
+    /// </param>
     public static string BuildUpdate(
-        IReadOnlyDictionary<string, object?> setValues, IReadOnlyDictionary<string, object?> matchValues, string tableName)
+        IReadOnlyDictionary<string, object?> setValues, IReadOnlyDictionary<string, object?> matchValues, string tableName,
+        string? identityColumnName = null)
     {
-        string setClause = string.Join(", ", setValues.Select(kv => $"{EscapeIdentifier(kv.Key)} = {FormatSqlLiteral(kv.Value)}"));
+        string setClause = string.Join(", ", setValues
+            .Where(kv => kv.Key != identityColumnName)
+            .Select(kv => $"{EscapeIdentifier(kv.Key)} = {FormatSqlLiteral(kv.Value)}"));
         return $"UPDATE {EscapeIdentifier(tableName)} SET {setClause} WHERE {BuildWhereClause(matchValues)};";
     }
 

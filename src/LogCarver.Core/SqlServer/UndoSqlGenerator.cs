@@ -15,13 +15,20 @@ namespace LogCarver.Core.SqlServer;
 /// </summary>
 public static class UndoSqlGenerator
 {
+    /// <param name="identityColumnName">
+    /// The table's identity column, if it has one, else null - see
+    /// SqlStatementBuilder's own doc comment for why this matters (an
+    /// UPDATE's undo must never try to SET it; a DELETE's undo, which
+    /// re-INSERTs the row, needs it wrapped in IDENTITY_INSERT to restore
+    /// the original value instead of getting a new one assigned).
+    /// </param>
     /// <returns>The undo statement, or null if the event has no usable before/after image to work from (e.g. refused by the schema-drift guard).</returns>
-    public static string? Generate(RowEvent evt, string tableName) => evt.Kind switch
+    public static string? Generate(RowEvent evt, string tableName, string? identityColumnName = null) => evt.Kind switch
     {
         RowEventKind.Insert when evt.After is not null => SqlStatementBuilder.BuildDelete(evt.After, tableName),
-        RowEventKind.Delete when evt.Before is not null => SqlStatementBuilder.BuildInsert(evt.Before, tableName),
+        RowEventKind.Delete when evt.Before is not null => SqlStatementBuilder.BuildInsert(evt.Before, tableName, identityColumnName),
         RowEventKind.Update when evt.Before is not null && evt.After is not null =>
-            SqlStatementBuilder.BuildUpdate(setValues: evt.Before, matchValues: evt.After, tableName),
+            SqlStatementBuilder.BuildUpdate(setValues: evt.Before, matchValues: evt.After, tableName, identityColumnName),
         _ => null,
     };
 }

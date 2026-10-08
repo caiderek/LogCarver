@@ -199,4 +199,61 @@ public class UndoSqlGeneratorTests
 
         Assert.Equal("DELETE FROM [LOG].[JobRun] WHERE [Id] = 5 AND [Note] = N'hello' AND [Amount] = 100;", sql);
     }
+
+    [Fact]
+    public void UpdateOnAnIdentityTable_ExcludesTheIdentityColumnFromSet_ButKeepsItInWhere()
+    {
+        // Real bug, found 2026-10-08 via an independent cross-check agent
+        // testing LogCarverGuard against a table using SQL Server's
+        // ordinary default IDENTITY-PK pattern - every test fixture in
+        // this project's own history up to that point happened to use an
+        // explicitly-assigned PK instead, so this was invisible until an
+        // outside tester hit it on the very first try. SQL Server rejects
+        // outright any UPDATE that tries to SET an identity column, even
+        // to its own unchanged value (error 8102) - restore_audit_record
+        // failed 100% of the time on any identity-keyed table as a result.
+        // A row's own identity value can never actually change via UPDATE
+        // in the first place, so simply never SETting it loses nothing.
+        var evt = MakeEvent(RowEventKind.Update, before: Row(5, "before", 100), after: Row(5, "after", 100));
+
+        var sql = UndoSqlGenerator.Generate(evt, "dbo.Orders", identityColumnName: "Id");
+
+        Assert.Equal(
+            "UPDATE [dbo].[Orders] SET [Note] = N'before', [Amount] = 100 WHERE [Id] = 5 AND [Note] = N'after' AND [Amount] = 100;",
+            sql);
+    }
+
+    [Fact]
+    public void DeleteUndoOnAnIdentityTable_WrapsTheReinsertInIdentityInsertOnOff()
+    {
+        // Sibling fix to the UPDATE case above: undoing a DELETE re-INSERTs
+        // the row, and restoring its ORIGINAL identity value (not letting
+        // SQL Server assign a new one) requires SET IDENTITY_INSERT ON
+        // around the INSERT - without it, SQL Server rejects an INSERT
+        // that names an identity column in its column list outright.
+        var evt = MakeEvent(RowEventKind.Delete, before: Row(5, "gone", 100), after: null);
+
+        var sql = UndoSqlGenerator.Generate(evt, "dbo.Orders", identityColumnName: "Id");
+
+        Assert.Equal(
+            "SET IDENTITY_INSERT [dbo].[Orders] ON; INSERT INTO [dbo].[Orders] ([Id], [Note], [Amount]) VALUES (5, N'gone', 100); SET IDENTITY_INSERT [dbo].[Orders] OFF;",
+            sql);
+    }
+
+    [Fact]
+    public void NoIdentityColumnGiven_BehavesExactlyAsBefore()
+    {
+        // identityColumnName defaults to null - every existing caller
+        // (CLI, exporter, pre-2026-10-08 tests) must see identical output
+        // to before this parameter existed.
+        var updateEvt = MakeEvent(RowEventKind.Update, before: Row(5, "before", 100), after: Row(5, "after", 100));
+        Assert.Equal(
+            "UPDATE [dbo].[Orders] SET [Id] = 5, [Note] = N'before', [Amount] = 100 WHERE [Id] = 5 AND [Note] = N'after' AND [Amount] = 100;",
+            UndoSqlGenerator.Generate(updateEvt, "dbo.Orders"));
+
+        var deleteEvt = MakeEvent(RowEventKind.Delete, before: Row(5, "gone", 100), after: null);
+        Assert.Equal(
+            "INSERT INTO [dbo].[Orders] ([Id], [Note], [Amount]) VALUES (5, N'gone', 100);",
+            UndoSqlGenerator.Generate(deleteEvt, "dbo.Orders"));
+    }
 }
