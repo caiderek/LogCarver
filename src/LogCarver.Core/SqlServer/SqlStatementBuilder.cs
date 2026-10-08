@@ -77,7 +77,19 @@ internal static class SqlStatementBuilder
         // NotSupportedException below outright crashes the whole
         // --undo/--replay/--export sql run, losing every other row too.
         long l => l.ToString(),
-        DateTime dt => $"'{dt:yyyy-MM-dd HH:mm:ss.fff}'",
+        // Found 2026-10-08 via LogCarverGuard's Rocky9 stress test: a
+        // DATETIME2(7)-precision column (SYSDATETIME() has sub-millisecond
+        // precision almost every time) formatted to only 3 fractional
+        // digits here means the undo WHERE clause's literal never equals
+        // the real stored value - every single row misses the match and
+        // UndoSqlGenerator's optimistic-concurrency guard false-positives
+        // as "the data changed", when it never did. .NET DateTime's own
+        // tick resolution is 100ns, exactly DATETIME2(7)'s own max
+        // precision, so 7 fractional digits round-trips losslessly; lower-
+        // precision DATETIME/SMALLDATETIME columns just get trailing
+        // zeros, which the implicit conversion on comparison still matches
+        // correctly.
+        DateTime dt => $"'{dt:yyyy-MM-dd HH:mm:ss.fffffff}'",
         // decimal.ToString() never uses scientific notation (unlike
         // double/float), so this always produces a plain SQL Server
         // decimal/numeric literal - InvariantCulture avoids a comma

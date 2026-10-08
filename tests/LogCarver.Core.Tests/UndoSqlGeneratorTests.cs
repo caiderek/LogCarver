@@ -150,6 +150,28 @@ public class UndoSqlGeneratorTests
     }
 
     [Fact]
+    public void DateTimeValue_FormatsWithFullSubMillisecondPrecision_NotJustMilliseconds()
+    {
+        // Real bug, found 2026-10-08 via LogCarverGuard's Rocky9 remote
+        // stress test: a DATETIME2(7) column (SYSDATETIME() almost always
+        // has sub-millisecond precision) formatted to only 3 fractional
+        // digits here meant the undo WHERE clause's literal never equaled
+        // the actual stored value - every single row in a 100,000-row
+        // restore reported a false-positive "data already changed"
+        // conflict and restored 0 rows, even though nothing had actually
+        // changed. .NET DateTime's own tick resolution is 100ns, exactly
+        // DATETIME2(7)'s own max precision, so all 7 fractional digits
+        // must round-trip, not just the first 3.
+        var dt = new DateTime(2026, 10, 8, 8, 19, 9).AddTicks(6665310);
+        var row = new Dictionary<string, object?> { ["Id"] = 1, ["UpdatedAt"] = dt };
+        var evt = new RowEvent("lsn1", RowEventKind.Insert, null, row, null, null, "0001:0F", 1);
+
+        var sql = UndoSqlGenerator.Generate(evt, "dbo.Orders");
+
+        Assert.Equal("DELETE FROM [dbo].[Orders] WHERE [Id] = 1 AND [UpdatedAt] = '2026-10-08 08:19:09.6665310';", sql);
+    }
+
+    [Fact]
     public void FalseBoolValue_FormatsAsZero()
     {
         var row = new Dictionary<string, object?> { ["Id"] = 5, ["IsActive"] = false };
