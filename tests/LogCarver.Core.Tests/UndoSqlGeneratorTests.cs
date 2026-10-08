@@ -162,13 +162,21 @@ public class UndoSqlGeneratorTests
         // changed. .NET DateTime's own tick resolution is 100ns, exactly
         // DATETIME2(7)'s own max precision, so all 7 fractional digits
         // must round-trip, not just the first 3.
+        //
+        // The literal is wrapped in CONVERT(DATETIME2(7), '...') rather
+        // than a bare string - see FormatSqlLiteral's own doc comment for
+        // why a bare 7-digit string literal outright throws (not just
+        // mismatches) against a plain DATETIME column, a real regression
+        // in this same fix found hours after it first shipped.
         var dt = new DateTime(2026, 10, 8, 8, 19, 9).AddTicks(6665310);
         var row = new Dictionary<string, object?> { ["Id"] = 1, ["UpdatedAt"] = dt };
         var evt = new RowEvent("lsn1", RowEventKind.Insert, null, row, null, null, "0001:0F", 1);
 
         var sql = UndoSqlGenerator.Generate(evt, "dbo.Orders");
 
-        Assert.Equal("DELETE FROM [dbo].[Orders] WHERE [Id] = 1 AND [UpdatedAt] = '2026-10-08 08:19:09.6665310';", sql);
+        Assert.Equal(
+            "DELETE FROM [dbo].[Orders] WHERE [Id] = 1 AND CONVERT(DATETIME2(7), [UpdatedAt]) = CONVERT(DATETIME2(7), '2026-10-08 08:19:09.6665310');",
+            sql);
     }
 
     [Fact]

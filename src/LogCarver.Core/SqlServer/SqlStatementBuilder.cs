@@ -70,10 +70,31 @@ internal static class SqlStatementBuilder
         return $"UPDATE {EscapeIdentifier(tableName)} SET {setClause} WHERE {BuildWhereClause(matchValues)};";
     }
 
+    // Real bug, found 2026-10-08 via an independent cross-check agent's
+    // SECOND testing round, hours after the FIRST fix for this same
+    // DateTime-comparison area shipped: wrapping only the LITERAL side in
+    // CONVERT(DATETIME2(7), ...) (see FormatSqlLiteral's own doc comment)
+    // fixed the outright-throws-an-error case, but comparing that
+    // DATETIME2(7)-typed literal directly against a plain DATETIME column
+    // is itself unreliable - confirmed via a direct, repeated sqlcmd probe:
+    // `@datetimeCol = CONVERT(DATETIME2(7), @matchingLiteral)` intermittently
+    // returns NO MATCH even when an explicit CAST of the column to
+    // DATETIME2(7) first provably equals the same literal. SQL Server's
+    // documented data-type-precedence table says DATETIME2 outranks
+    // DATETIME (implying the DATETIME side should always widen up for an
+    // implicit comparison), but that is not what was observed empirically -
+    // whatever the real mechanism, relying on implicit cross-type
+    // comparison here is not safe. Explicitly converting BOTH sides to the
+    // same type removes the ambiguity entirely and was confirmed reliable
+    // the same way. A plain string/int/etc. column is unaffected - only a
+    // DateTime value's own column reference needs the wrap.
     private static string BuildWhereClause(IReadOnlyDictionary<string, object?> row) =>
-        string.Join(" AND ", row.Select(kv => kv.Value is null
-            ? $"{EscapeIdentifier(kv.Key)} IS NULL"
-            : $"{EscapeIdentifier(kv.Key)} = {FormatSqlLiteral(kv.Value)}"));
+        string.Join(" AND ", row.Select(kv => kv.Value switch
+        {
+            null => $"{EscapeIdentifier(kv.Key)} IS NULL",
+            DateTime => $"CONVERT(DATETIME2(7), {EscapeIdentifier(kv.Key)}) = {FormatSqlLiteral(kv.Value)}",
+            _ => $"{EscapeIdentifier(kv.Key)} = {FormatSqlLiteral(kv.Value)}",
+        }));
 
     // Bracket-quotes each dot-separated part of an identifier (schema.table
     // or a bare column name) and doubles up any embedded "]" - the SQL
@@ -122,11 +143,33 @@ internal static class SqlStatementBuilder
         // UndoSqlGenerator's optimistic-concurrency guard false-positives
         // as "the data changed", when it never did. .NET DateTime's own
         // tick resolution is 100ns, exactly DATETIME2(7)'s own max
-        // precision, so 7 fractional digits round-trips losslessly; lower-
+        // precision, so 7 fractional digits round-trips losslessly.
+        //
+        // Real regression in that same fix, found 2026-10-08 via an
+        // independent cross-check agent's second testing round, within
+        // hours of the first fix shipping: the claim above that "lower-
         // precision DATETIME/SMALLDATETIME columns just get trailing
-        // zeros, which the implicit conversion on comparison still matches
-        // correctly.
-        DateTime dt => $"'{dt:yyyy-MM-dd HH:mm:ss.fffffff}'",
+        // zeros, which the implicit conversion still matches correctly"
+        // was never actually verified against a real DATETIME column, and
+        // was wrong - a bare 7-fractional-digit string literal
+        // ('...12:00:00.0000000') against a DATETIME target throws SQL
+        // Server error 241 ("Conversion failed when converting date
+        // and/or time from character string") outright, confirmed via a
+        // direct sqlcmd probe (CONVERT accepts up to 3 digits for
+        // DATETIME's own string-literal grammar, not 7). This broke both
+        // directions: an UPDATE undo's WHERE clause would throw instead of
+        // just mismatching, and a DELETE undo's INSERT (which embeds the
+        // literal directly into VALUES) failed outright on restore. Fixed
+        // by wrapping in an explicit CONVERT(DATETIME2(7), '...') instead
+        // of a bare string literal - DATETIME2(7)'s own string grammar
+        // accepts all 7 digits unconditionally (confirmed, it's what this
+        // whole fix already relies on), and converting a DATETIME2 value
+        // (not a raw string) to DATETIME/SMALLDATETIME afterward is an
+        // ordinary, always-succeeding, well-defined precision-narrowing
+        // conversion - never a string-parse error - confirmed via the same
+        // direct sqlcmd probe: CONVERT(DATETIME2(7), '...0000000') assigned
+        // to a DATETIME variable rounds cleanly to '...000', no error.
+        DateTime dt => $"CONVERT(DATETIME2(7), '{dt:yyyy-MM-dd HH:mm:ss.fffffff}')",
         // decimal.ToString() never uses scientific notation (unlike
         // double/float), so this always produces a plain SQL Server
         // decimal/numeric literal - InvariantCulture avoids a comma

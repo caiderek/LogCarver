@@ -457,9 +457,27 @@ public static class RowDecoder
         // divisible by 300, so dividing first truncates to 33333 instead of
         // 33333.33 and accumulates a real, visible drift (~0.5s off at
         // ~14.8M ticks, caught by this test's own assertion).
+        //
+        // Round, don't truncate, that division (found for real 2026-10-08,
+        // via an independent cross-check agent's testing turning up an
+        // intermittent, 100ns-level restore mismatch on plain DATETIME
+        // columns): 10,000,000/300 isn't an integer, so plain integer
+        // division (which truncates toward zero) silently rounds DOWN
+        // instead of to the nearest 100ns unit for most tick values - e.g.
+        // 11 ticks should widen to SQL Server's own 366,667 .NET ticks
+        // (confirmed via CAST(... AS DATETIME2(7)) against a real server),
+        // but 11L * 10_000_000 / 300 truncates to 366,666, one 100ns unit
+        // short. Invisible at millisecond-display precision (rounds the
+        // same either way), but a WHERE clause comparing at full DATETIME2
+        // precision - which 2026-10-08's own DATETIME2-precision fix now
+        // does, deliberately - needs the exact value, not a value that's
+        // merely millisecond-equivalent. Adding half the divisor before
+        // truncating is the standard round-to-nearest trick; valid here
+        // because a DATETIME's time-tick field is always non-negative.
+        long preciseTicks = ((long)ticks * TimeSpan.TicksPerSecond + 150) / 300;
         return new DateTime(1900, 1, 1, 0, 0, 0, DateTimeKind.Unspecified)
             .AddDays(days)
-            .AddTicks((long)ticks * TimeSpan.TicksPerSecond / 300);
+            .AddTicks(preciseTicks);
     }
 
     /// <summary>
