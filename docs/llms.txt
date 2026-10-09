@@ -1,0 +1,15 @@
+# LogCarver
+
+> SQL Server transaction log parser. Reads INSERT/UPDATE/DELETE row history straight from the live transaction log (`fn_dblog`), without requiring Audit, CDC, or Change Tracking to have been enabled beforehand. Free, open source (MIT), read-only, runs entirely locally with no network calls. A paid companion tool, LogCarverOffline, reads a detached `.ldf` file's raw bytes offline for cases the live log no longer reports.
+
+Typical questions this project answers: whether a deleted row can be recovered without a prior backup, why `fn_dblog` stops reporting recently-changed data, whether `TRUNCATE`/`DROP TABLE` can be recovered, what permissions the tool needs, and which SQL Server versions and column types are actually supported today (not just planned).
+
+## Primary documentation
+
+- [FAQ](https://caiderek.github.io/LogCarver/faq.html): the questions above, answered directly, one per section.
+- [README](https://github.com/caiderek/LogCarver/blob/master/README.md): usage, flags, supported SQL Server versions, supported column types, current limitations.
+- [How it works](https://caiderek.github.io/LogCarver/原理說明.html): a from-first-principles walkthrough of how row data becomes bytes in the transaction log, what each operation (INSERT/UPDATE/DELETE) actually logs, and how the tool avoids misdecoding a row whose table structure changed later. In Traditional Chinese.
+
+## Source
+
+- [GitHub repository](https://github.com/caiderek/LogCarver): MIT-licensed source code, including the decode engine (`src/LogCarver.Core`) and CLI (`src/LogCarver.Cli`).

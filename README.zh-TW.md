@@ -24,7 +24,7 @@ SQL Server 交易記錄檔解析工具 —— 直接從交易記錄檔讀出 ins
 
 - 只支援 SQL Server,透過 `fn_dblog` 連線到執行中的實例
 - 完全在本機執行 —— 不會對外連線,資料不會離開執行這個工具的機器
-- **目前能解碼的欄位型別:`int`、`datetime2(3)`/`datetime2(4)`、`char`、`nchar`、`varchar`、`nvarchar`。** 其他型別(`decimal`/`numeric`/`money`、`bigint`/`smallint`/`tinyint`、`bit`、`float`/`real`、`date`/`time`、其他精度的 `datetime2`、`uniqueidentifier` 等)會明確拒絕解碼,不會用猜的 —— 這些欄位所在的列會顯示 `not shown - ... is not implemented yet`。更多型別在規劃中;如果你的表有財務相關的 `decimal`/`money` 欄位,今天先不要完全依賴這個工具。
+- **目前能解碼的欄位型別:**`int`、`bigint`、`smallint`、`tinyint`、`bit`、`uniqueidentifier`、`date`、`datetime2`(任意精度 0–7)、`datetime`、`smalldatetime`、`decimal`/`numeric`(任意精度 1–38)、`money`、`smallmoney`、`float`、`real`、`char`、`nchar`、`varchar`、`nvarchar`、`varbinary`、`binary`——也包含 `geography`/`geometry`/`hierarchyid`,因為 SQL Server 內部把它們跟 `varbinary`用同一種方式儲存。其他型別(例如單獨的 `time`、`xml`)會明確拒絕解碼,不會用猜的 —— 這些欄位所在的列會顯示 `not shown - ... is not implemented yet`。
 - 同樣採取「明確偵測並拒絕、而非用猜的」原則:壓縮表(ROW/PAGE)、off-row LOB 欄位、早於某次改表結構(schema-changing DDL)的舊紀錄
 - **已知的「過度拒絕」限制,不是解錯資料的風險**:`TRUNCATE TABLE` 產生的 log 紀錄類型(`LOP_HOBT_DDL`)跟真正改變欄位結構的 `ALTER TABLE` 是同一種,目前工具分不出兩者的差別——所以 `TRUNCATE` 會被當成改表結構的邊界,連帶讓它之前所有事件都被拒絕顯示,即使 `TRUNCATE` 根本沒有改變欄位配置。那些被拒絕的歷史紀錄其實是可以正確解碼的,只是這個工具現在還沒把它們秀出來。
 - 離線解析 `.ldf` 檔案(救回 `fn_dblog` 已經看不到、但實體上還沒被覆寫的資料)不包含在這個免費工具裡——這是付費版 **LogCarverOffline** 的差異化能力,詳見下方[離線救援](#離線救援)。
