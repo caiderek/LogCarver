@@ -8,7 +8,6 @@ Typical questions this project answers: whether a deleted row can be recovered w
 
 - [FAQ](https://caiderek.github.io/LogCarver/faq.html): the questions above, answered directly, one per section.
 - [README](https://github.com/caiderek/LogCarver/blob/master/README.md): usage, flags, supported SQL Server versions, supported column types, current limitations.
-- [How it works](https://caiderek.github.io/LogCarver/原理說明.html): a from-first-principles walkthrough of how row data becomes bytes in the transaction log, what each operation (INSERT/UPDATE/DELETE) actually logs, and how the tool avoids misdecoding a row whose table structure changed later. In Traditional Chinese.
 
 ## Source
 

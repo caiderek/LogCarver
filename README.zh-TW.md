@@ -12,7 +12,7 @@ SQL Server 交易記錄檔解析工具 —— 直接從交易記錄檔讀出 ins
 
 ## 狀態
 
-**可用的 MVP。** 連上執行中的 SQL Server 實例,解碼一張表完整的 INSERT / UPDATE(前後值)/ DELETE 歷程,會防範 schema-drift 陷阱(用新的表結構去解舊資料列),支援篩選事故時間窗、單筆資料歷史查詢、Undo / Replay SQL 產生,以及時間點快照。想了解原理可以看 [`docs/原理說明.md`](docs/原理說明.md)。
+**可用的 MVP。** 連上執行中的 SQL Server 實例,解碼一張表完整的 INSERT / UPDATE(前後值)/ DELETE 歷程,會防範 schema-drift 陷阱(用新的表結構去解舊資料列),支援篩選事故時間窗、單筆資料歷史查詢、Undo / Replay SQL 產生,以及時間點快照。
 
 ## 使用前提
 

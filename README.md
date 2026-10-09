@@ -12,7 +12,7 @@ Grab the latest self-contained `LogCarver.exe` from the [Releases page](https://
 
 ## Status
 
-**Working MVP.** Connects to a live SQL Server instance, decodes a table's full INSERT/UPDATE (before/after)/DELETE history, guards against the schema-drift trap (decoding old rows with a newer table structure), and supports filtering to an incident time window, single-row history lookup, Undo/Replay SQL generation, and point-in-time snapshots. See [`docs/原理說明.md`](docs/原理說明.md) (Traditional Chinese) for a plain-language walkthrough of how it works.
+**Working MVP.** Connects to a live SQL Server instance, decodes a table's full INSERT/UPDATE (before/after)/DELETE history, guards against the schema-drift trap (decoding old rows with a newer table structure), and supports filtering to an incident time window, single-row history lookup, Undo/Replay SQL generation, and point-in-time snapshots.
 
 ## Prerequisites
 
