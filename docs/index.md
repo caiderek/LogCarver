@@ -1,3 +1,8 @@
+---
+title: LogCarver
+description: "SQL Server transaction log parser — recovers deleted/updated row history without CDC or Audit enabled beforehand. 免費開源,解析交易記錄檔救回誤刪或被改掉的資料,不需要事先開啟稽核功能。"
+---
+
 <p align="center"><img src="assets/logo.png" width="96" alt="LogCarver logo"></p>
 
 # LogCarver

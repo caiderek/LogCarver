@@ -1,3 +1,8 @@
+---
+title: LogCarver FAQ
+description: "Can a deleted SQL Server row be recovered without a backup? Why does fn_dblog stop reporting recent deletes? Can TRUNCATE or DROP TABLE be undone? What permissions does recovery need? Direct answers, including the honest limits."
+---
+
 # LogCarver FAQ
 
 **English | [繁體中文](faq.zh-TW.md)**

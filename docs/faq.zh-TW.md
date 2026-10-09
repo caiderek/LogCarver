@@ -1,3 +1,8 @@
+---
+title: LogCarver 常見問題
+description: "SQL Server 沒有備份,誤刪的資料還能救回來嗎?fn_dblog 為什麼查不到剛刪除的資料?TRUNCATE、DROP TABLE 救得回來嗎?這個工具需要什麼權限?直接回答,包含誠實的限制。"
+---
+
 # LogCarver 常見問題
 
 **[English](faq.md) | 繁體中文**
