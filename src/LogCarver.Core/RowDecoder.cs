@@ -187,10 +187,10 @@ public static class RowDecoder
         int nullBitmapStart = fixedEnd + 2;
         int afterNullBitmap = nullBitmapStart + nullBitmapBytes;
 
-        // Null check happens BEFORE decoding, not after (2026-09-30 fix - a
-        // real customer row crashed here): a NULL fixed-length column's
-        // bytes are reserved but meaningless, and an earlier version of
-        // this loop decoded every fixed column unconditionally, then
+        // Null check happens BEFORE decoding, not after: a NULL
+        // fixed-length column's bytes are reserved but meaningless, and an
+        // earlier version of this loop decoded every fixed column
+        // unconditionally, then
         // overwrote NULL ones with null afterward - reasoning that garbage
         // bytes decoded into a value nobody keeps is harmless. That holds
         // for TypeInt/TypeBigInt (BitConverter never throws on any bit
@@ -371,11 +371,10 @@ public static class RowDecoder
                         // entry via the ordinary null-bitmap path below,
                         // verified against real captured INSERT/UPDATE rows.
                         //
-                        // Flagged as possibly-corrupted too (found missing
-                        // for real 2026-10-08, via an independent cross-
-                        // check agent): this placeholder string is meant to
-                        // be caught by a HUMAN reviewing generated --undo/
-                        // --export SQL text before running it (see
+                        // Flagged as possibly-corrupted too: this placeholder
+                        // string is meant to be caught by a HUMAN reviewing
+                        // generated --undo/--export SQL text before running
+                        // it (see
                         // UndoSqlGenerator's own doc comment - "LogCarver
                         // never executes anything itself"). LogCarverGuard's
                         // restore_audit_record has no human in the loop at
@@ -482,22 +481,18 @@ public static class RowDecoder
         // 33333.33 and accumulates a real, visible drift (~0.5s off at
         // ~14.8M ticks, caught by this test's own assertion).
         //
-        // Round, don't truncate, that division (found for real 2026-10-08,
-        // via an independent cross-check agent's testing turning up an
-        // intermittent, 100ns-level restore mismatch on plain DATETIME
-        // columns): 10,000,000/300 isn't an integer, so plain integer
-        // division (which truncates toward zero) silently rounds DOWN
-        // instead of to the nearest 100ns unit for most tick values - e.g.
-        // 11 ticks should widen to SQL Server's own 366,667 .NET ticks
-        // (confirmed via CAST(... AS DATETIME2(7)) against a real server),
-        // but 11L * 10_000_000 / 300 truncates to 366,666, one 100ns unit
-        // short. Invisible at millisecond-display precision (rounds the
-        // same either way), but a WHERE clause comparing at full DATETIME2
-        // precision - which 2026-10-08's own DATETIME2-precision fix now
-        // does, deliberately - needs the exact value, not a value that's
-        // merely millisecond-equivalent. Adding half the divisor before
-        // truncating is the standard round-to-nearest trick; valid here
-        // because a DATETIME's time-tick field is always non-negative.
+        // Round, don't truncate, that division: 10,000,000/300 isn't an
+        // integer, so plain integer division (which truncates toward zero)
+        // silently rounds DOWN instead of to the nearest 100ns unit for most
+        // tick values - e.g. 11 ticks should widen to SQL Server's own
+        // 366,667 .NET ticks (confirmed via CAST(... AS DATETIME2(7))
+        // against a real server), but 11L * 10_000_000 / 300 truncates to
+        // 366,666, one 100ns unit short. Invisible at millisecond-display
+        // precision (rounds the same either way), but a WHERE clause
+        // comparing at full DATETIME2 precision needs the exact value, not
+        // one that's merely millisecond-equivalent. Adding half the divisor
+        // before truncating is the standard round-to-nearest trick; valid
+        // here because a DATETIME's time-tick field is always non-negative.
         long preciseTicks = ((long)ticks * TimeSpan.TicksPerSecond + 150) / 300;
         return new DateTime(1900, 1, 1, 0, 0, 0, DateTimeKind.Unspecified)
             .AddDays(days)
@@ -600,11 +595,11 @@ public static class RowDecoder
     /// first, combined as one big base-2^32 integer. The actual value is
     /// that integer divided by 10^Scale.
     ///
-    /// 4-group (17-byte, precision 29-38) case (verified for real
-    /// 2026-10-08 the same way - real captured fn_dblog bytes for both a
-    /// large positive and a large negative DECIMAL(38,10) value, group
-    /// count and sign-byte convention both confirmed identical to the
-    /// 1-3 group case): returns <see cref="HighPrecisionDecimal"/> instead
+    /// 4-group (17-byte, precision 29-38) case (verified against real
+    /// captured fn_dblog bytes for both a large positive and a large
+    /// negative DECIMAL(38,10) value, group count and sign-byte convention
+    /// both confirmed identical to the 1-3 group case): returns
+    /// <see cref="HighPrecisionDecimal"/> instead
     /// of <see cref="decimal"/> here, since a 128-bit magnitude doesn't
     /// fit System.Decimal's 96-bit one - see that type's own doc comment.
     /// </summary>
@@ -662,10 +657,8 @@ public static class RowDecoder
 
     /// <summary>
     /// Dispatches a variable-length column's raw bytes by its REAL type,
-    /// not just "always text" - found for real 2026-10-08 via an
-    /// independent cross-check agent hitting a VARBINARY(MAX) column:
-    /// every variable-length column used to go through
-    /// <see cref="DecodeVarCharBytes"/> unconditionally, so a VARBINARY or
+    /// not just "always text": every variable-length column used to go
+    /// through <see cref="DecodeVarCharBytes"/> unconditionally, so a VARBINARY or
     /// GEOGRAPHY/GEOMETRY column's raw bytes got decoded as (garbled)
     /// Windows-1252 text - the resulting string round-tripped fine through
     /// FormatSqlLiteral (it's a valid, if nonsensical, NVARCHAR literal),
