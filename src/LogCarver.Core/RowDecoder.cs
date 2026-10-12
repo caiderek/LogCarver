@@ -67,6 +67,7 @@ public static class RowDecoder
     private const int TypeDateTime2 = 42;
     private const int TypeDecimal = 106;
     private const int TypeNumeric = 108;
+    private const int TypeVarChar = 167;
     private const int TypeChar = 175;
     private const int TypeNVarChar = 231;
     private const int TypeNChar = 239;
@@ -682,6 +683,7 @@ public static class RowDecoder
     /// </summary>
     private static object DecodeVariableLengthValue(ReadOnlySpan<byte> bytes, ColumnSchema col)
     {
+        EnsureSupportedVariableLengthType(col);
         if (col.SystemTypeId is not (TypeVarBinary or TypeBinary))
             return DecodeVarCharBytes(bytes, col.SystemTypeId);
         return col.TypeName is "varbinary" or "binary" or null
@@ -689,8 +691,23 @@ public static class RowDecoder
             : new SqlClrBinaryValue(bytes.ToArray(), col.TypeName);
     }
 
+    /// <summary>
+    /// Allow-list, not a block-list: xml, sql_variant, text, ntext and image
+    /// also live in the variable-length section, and falling through to the
+    /// text decode used to turn their bytes into plausible-looking (wrong)
+    /// strings. Anything not known to be plain text or binary is refused, so
+    /// the row is flagged instead of guessed.
+    /// </summary>
+    private static void EnsureSupportedVariableLengthType(ColumnSchema col)
+    {
+        if (col.SystemTypeId is not (TypeVarChar or TypeNVarChar or TypeChar or TypeNChar or TypeVarBinary or TypeBinary))
+            throw new NotSupportedException(
+                $"Column '{col.Name}': system_type_id {col.SystemTypeId} ({col.TypeName ?? "unknown type"}) is not implemented yet.");
+    }
+
     private static object DefaultEmptyVariableLengthValue(ColumnSchema col)
     {
+        EnsureSupportedVariableLengthType(col);
         if (col.SystemTypeId is not (TypeVarBinary or TypeBinary))
             return string.Empty;
         return col.TypeName is "varbinary" or "binary" or null
