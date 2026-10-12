@@ -24,7 +24,7 @@ Grab the latest self-contained `LogCarver.exe` from the [Releases page](https://
 
 - SQL Server only, connects to a live instance via `fn_dblog`
 - Runs entirely locally — no network calls, no data ever leaves the machine it runs on
-- **Column types currently decoded:** `int`, `bigint`, `smallint`, `tinyint`, `bit`, `uniqueidentifier`, `date`, `datetime2` (any scale, 0–7), `datetime`, `smalldatetime`, `decimal`/`numeric` (any precision, 1–38), `money`, `smallmoney`, `float`, `real`, `char`, `nchar`, `varchar`, `nvarchar`, `varbinary`, `binary` — including `geography`/`geometry`/`hierarchyid`, which SQL Server stores the same way as `varbinary` internally. Anything else (e.g. plain `time` with no date part, `xml`) is explicitly refused, not guessed — you'll see `not shown - ... is not implemented yet` for those rows.
+- **Column types currently decoded:** `int`, `bigint`, `smallint`, `tinyint`, `bit`, `uniqueidentifier`, `date`, `datetime2` (any scale, 0–7), `datetime`, `smalldatetime`, `decimal`/`numeric` (any precision, 1–38), `money`, `smallmoney`, `float`, `real`, `char`, `nchar`, `varchar`, `nvarchar`, `varbinary`, `binary` — including `geography`/`geometry`/`hierarchyid`, which SQL Server stores the same way as `varbinary` internally. Anything else (e.g. plain `time` with no date part, `xml`, `sql_variant`) is explicitly refused, not guessed — you'll see `not shown - ... is not implemented yet` for those rows.
 - Also explicitly detected and refused rather than guessed at: compressed tables (ROW/PAGE), off-row LOB values, records predating a schema-changing DDL
 - **Known over-refusal, not a wrong-data risk:** `TRUNCATE TABLE` produces the same kind of log record (`LOP_HOBT_DDL`) as a real schema-changing `ALTER TABLE`, and the two aren't currently distinguished — so a `TRUNCATE` gets treated as a schema boundary, and every event before it gets refused too, even though `TRUNCATE` never actually changes column layout. The refused history is real and decodable; this tool just doesn't show it yet.
 - Offline `.ldf` file analysis — recovering data `fn_dblog` can no longer see but that hasn't been physically overwritten yet — isn't part of this free tool. That's the paid **LogCarverOffline**'s differentiator; see [Offline recovery](#offline-recovery) below.
@@ -73,6 +73,10 @@ The important nuance: "marked reusable" is not the same as "physically overwritt
 ## Offline recovery
 
 If `fn_dblog` reports nothing for a table, that usually means the relevant VLF has already been marked reusable and rotated past — but the data may still be physically present in the `.ldf` file. **[LogCarverOffline](https://buy.polar.sh/polar_cl_tEgu9FbaX6cGO3dorFdFUPp8kK9F32RVHG5op1Gavh1)**, a paid tool built on the same decode engine, reads raw `.ldf` bytes directly and can often recover exactly this case, even after the database has gone offline or been detached. [Free trial](https://buy.polar.sh/polar_cl_OOcUPxj6yjJYwHRYqBrMixDGa3r3HVapldYVu4PtSeW) available (no license, first 10 recovered events) — confirm it can find your data before buying. Questions: `logcarveroffline@gmail.com`.
+
+## Use it from an AI assistant (MCP)
+
+[LogCarver.Mcp](https://github.com/caiderek/LogCarver.Mcp) wraps this decode engine in a read-only [MCP](https://modelcontextprotocol.io) server, so an AI assistant such as Claude Code or Cursor can ask "what was deleted from this table?" directly. It has one tool, `find_deleted_rows`, runs only `SELECT`s, and stays on your machine. Install with `dotnet tool install -g LogCarver.Mcp`; it is also listed in the official MCP registry as `io.github.caiderek/logcarver-mcp`.
 
 ## Building from source
 

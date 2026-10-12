@@ -55,3 +55,7 @@ description: "SQL Server 沒有備份,誤刪的資料還能救回來嗎?fn_dblog
 兩者用同一套解碼引擎。免費版 CLI 透過 `fn_dblog` 讀**執行中**的 SQL Server 實例,只能看到記錄檔目前還在用的 VLF 裡的內容。**[LogCarverOffline](https://buy.polar.sh/polar_cl_tEgu9FbaX6cGO3dorFdFUPp8kK9F32RVHG5op1Gavh1)** 則直接離線讀取 `.ldf` 檔案的原始位元組,只要底層位元組還沒被實際覆寫,通常還能救回 `fn_dblog` 已經不再回報的資料。提供[免費試用版](https://buy.polar.sh/polar_cl_OOcUPxj6yjJYwHRYqBrMixDGa3r3HVapldYVu4PtSeW)(不用序號,可看前 10 筆救回的事件),先確認救得回你要的資料再購買。
 
 兩個版本都救不回 `TRUNCATE` 或 `DROP` 清空的資料——見上方說明,這是記錄機制本身的限制,不是功能缺口。
+
+## AI 助理(Claude、Cursor 等)可以直接用它嗎？
+
+可以。**[LogCarver.Mcp](https://github.com/caiderek/LogCarver.Mcp)** 是建構在同一套解碼引擎上的唯讀 [MCP](https://modelcontextprotocol.io) server,只提供一個 tool `find_deleted_rows`,從執行中的記錄檔讀出某張表被刪除(或新增、修改)的資料列,以 JSON 回傳。它只執行 `SELECT`,不會執行它所建議的還原 SQL,全部在你的機器上跑。限制跟 CLI 一樣:只看得到還在使用中的記錄檔、救不回 `TRUNCATE`/`DROP`、連線帳號要是 sysadmin。用 `dotnet tool install -g LogCarver.Mcp` 安裝;官方 MCP registry 裡的名稱是 `io.github.caiderek/logcarver-mcp`。

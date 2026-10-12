@@ -55,3 +55,7 @@ See [README → Scope](../README.md#scope-current) for the current list. Anythin
 Both share the same decode engine. The free CLI reads a **live** SQL Server instance through `fn_dblog`, which only reports what's still in the log's active VLFs. **[LogCarverOffline](https://buy.polar.sh/polar_cl_tEgu9FbaX6cGO3dorFdFUPp8kK9F32RVHG5op1Gavh1)** instead reads the raw `.ldf` file's bytes directly, offline, which can often still recover data `fn_dblog` has already stopped reporting — as long as the bytes haven't been physically overwritten. A [free trial](https://buy.polar.sh/polar_cl_OOcUPxj6yjJYwHRYqBrMixDGa3r3HVapldYVu4PtSeW) (no license, first 10 recovered events) lets you confirm it can find your data before buying.
 
 Neither version recovers `TRUNCATE` or `DROP` — see above, that's a logging limitation, not a feature gap.
+
+## Can an AI assistant (Claude, Cursor, …) use this directly?
+
+Yes. **[LogCarver.Mcp](https://github.com/caiderek/LogCarver.Mcp)** is a read-only [MCP](https://modelcontextprotocol.io) server built on the same decode engine. It exposes one tool, `find_deleted_rows`, which reads a table's deleted (or inserted/updated) rows from the live log and returns them as JSON. It only runs `SELECT`s, never executes the optional undo SQL it can suggest, and runs entirely on your machine. The same limits apply as for the CLI: only what is still in the active log, no `TRUNCATE`/`DROP`, and the login must be sysadmin. Install with `dotnet tool install -g LogCarver.Mcp`; it is listed in the official MCP registry as `io.github.caiderek/logcarver-mcp`.

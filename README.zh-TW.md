@@ -24,7 +24,7 @@ SQL Server 交易記錄檔解析工具 —— 直接從交易記錄檔讀出 ins
 
 - 只支援 SQL Server,透過 `fn_dblog` 連到執行中的實例
 - 完全在本機執行 —— 不對外連線,資料不會離開執行這個工具的機器
-- **目前能解碼的欄位型別:**`int`、`bigint`、`smallint`、`tinyint`、`bit`、`uniqueidentifier`、`date`、`datetime2`(任意精度 0–7)、`datetime`、`smalldatetime`、`decimal`/`numeric`(任意精度 1–38)、`money`、`smallmoney`、`float`、`real`、`char`、`nchar`、`varchar`、`nvarchar`、`varbinary`、`binary`——也包含 `geography`/`geometry`/`hierarchyid`,因為 SQL Server 內部把它們跟 `varbinary` 用同一種方式儲存。其他型別(例如單獨的 `time`、`xml`)會明確拒絕解碼,不會用猜的 —— 這些欄位所在的列會顯示 `not shown - ... is not implemented yet`。
+- **目前能解碼的欄位型別:**`int`、`bigint`、`smallint`、`tinyint`、`bit`、`uniqueidentifier`、`date`、`datetime2`(任意精度 0–7)、`datetime`、`smalldatetime`、`decimal`/`numeric`(任意精度 1–38)、`money`、`smallmoney`、`float`、`real`、`char`、`nchar`、`varchar`、`nvarchar`、`varbinary`、`binary`——也包含 `geography`/`geometry`/`hierarchyid`,因為 SQL Server 內部把它們跟 `varbinary` 用同一種方式儲存。其他型別(例如單獨的 `time`、`xml`、`sql_variant`)會明確拒絕解碼,不會用猜的 —— 這些欄位所在的列會顯示 `not shown - ... is not implemented yet`。
 - 一樣是「測不出來就拒絕,不要亂猜」的原則:壓縮表(ROW/PAGE)、off-row LOB 欄位、早於改表結構(schema-changing DDL)的舊紀錄,都不解。
 - **已知的「過度拒絕」限制,不是解錯資料的風險**:`TRUNCATE TABLE` 產生的 log 紀錄類型(`LOP_HOBT_DDL`)跟真正改變欄位結構的 `ALTER TABLE` 是同一種,目前工具分不出兩者的差別 —— 所以 `TRUNCATE` 會被當成改表結構的邊界,連帶讓它之前所有事件都被拒絕顯示,即使 `TRUNCATE` 本身沒改欄位配置。那些被拒絕的歷史紀錄其實是可以正確解碼的,只是這個工具現在還沒把它們秀出來。
 - 離線解析 `.ldf` 檔案(救回 `fn_dblog` 已經看不到、但實體上還沒被覆寫的資料)不包含在這個免費工具裡 —— 這是付費版 **LogCarverOffline** 的差異化能力,詳見下方[離線救援](#離線救援)。
@@ -73,6 +73,10 @@ LogCarver.exe localhost MyDatabase dbo.Orders --user sa --password "..."
 ## 離線救援
 
 如果 `fn_dblog` 對某張表什麼都查不到,通常代表相關的 VLF 已經被標記為可重用、視窗已經滾過去了 —— 但資料很可能實體上還留在 `.ldf` 檔案裡。**[LogCarverOffline](https://buy.polar.sh/polar_cl_tEgu9FbaX6cGO3dorFdFUPp8kK9F32RVHG5op1Gavh1)** 是建構在同一套解碼引擎上的付費工具,直接讀取 `.ldf` 原始位元組,即使資料庫已經離線或 detach,通常仍能救回這種情況。提供[免費試用版](https://buy.polar.sh/polar_cl_OOcUPxj6yjJYwHRYqBrMixDGa3r3HVapldYVu4PtSeW)(不用序號,可看前 10 筆救回的事件)—— 先確認救得回你要的資料再購買。有問題可以寄信到 `logcarveroffline@gmail.com`。
+
+## 讓 AI 助理直接使用(MCP)
+
+[LogCarver.Mcp](https://github.com/caiderek/LogCarver.Mcp) 把這套解碼引擎包成唯讀的 [MCP](https://modelcontextprotocol.io) server,讓 Claude Code、Cursor 這類 AI 助理可以直接問「這張表剛剛被刪了什麼?」。它只有一個 tool `find_deleted_rows`,只執行 `SELECT`,資料不會離開你的機器。用 `dotnet tool install -g LogCarver.Mcp` 安裝;官方 MCP registry 裡也有,名稱是 `io.github.caiderek/logcarver-mcp`。
 
 ## 從原始碼建置
 
