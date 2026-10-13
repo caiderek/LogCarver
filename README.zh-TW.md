@@ -6,6 +6,8 @@
 
 SQL Server 交易記錄檔解析工具 —— 直接從交易記錄檔讀出 insert/update/delete 歷程,不需要事先啟用 Audit / CDC / Change Tracking。
 
+資料被刪了、又沒有備份?先看 [處理步驟](docs/recover-deleted-rows.zh-TW.md)。
+
 ## 下載
 
 到 [Releases 頁面](https://github.com/caiderek/LogCarver/releases/latest) 下載最新的 `LogCarver.exe`(單一檔案、內含執行環境),目標機器不需要另外安裝 .NET。

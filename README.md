@@ -6,6 +6,8 @@
 
 SQL Server transaction log parser — reads insert/update/delete history straight from the transaction log, without requiring Audit/CDC/Change Tracking to have been enabled beforehand.
 
+Deleted rows and no backup? Start with the [step-by-step guide](docs/recover-deleted-rows.md).
+
 ## Download
 
 Grab the latest self-contained `LogCarver.exe` from the [Releases page](https://github.com/caiderek/LogCarver/releases/latest) — no .NET installation required on the target machine.
