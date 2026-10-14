@@ -1,7 +1,7 @@
-<Project>
+﻿<Project>
 
   <PropertyGroup>
-    <Version>0.1.5</Version>
+    <Version>0.1.14</Version>
     <Authors>Derek</Authors>
     <Company>Derek</Company>
     <Description>Reconstructs SQL Server INSERT/UPDATE/DELETE history from fn_dblog without requiring Audit, CDC, or Change Tracking to have been enabled beforehand.</Description>
