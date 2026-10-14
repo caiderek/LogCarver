@@ -320,9 +320,41 @@ public static class RowImageAnchoring
                 // it; only delete + insert can make a new row.
                 return !(deletedAfter && (insertedHashesAfter.Contains(hash) || hashlessInsertAfter));
             }
+            if (last.Context != "LCX_HEAP")
+                return !(deletedAfter && (insertedHashesAfter.Count > 0 || hashlessInsertAfter));
             // No hash (a heap row): its slot is only the row's if no row was
             // removed from or put on that page afterwards.
             return !deletePagesAfter.Contains(last.PageId!) && !insertPagesAfter.Contains(last.PageId!);
+        }
+
+        // The row index has followed every record up to the bound; carry it
+        // through what happened after, so that "where is this row now" holds
+        // for rows that have no key hash (see below) as well.
+        if (logWasBounded && recordsAfterBound is not null)
+        {
+            var insertPageOfTx = new Dictionary<string, string>();
+            foreach (var later in recordsAfterBound)
+            {
+                if (later.PageId is null || later.SlotId is null) continue;
+                switch (later.Operation)
+                {
+                    case "LOP_INSERT_ROWS" or "LOP_MODIFY_ROW" or "LOP_MODIFY_COLUMNS":
+                        rowKeys.Observe(later, rowKeys.Resolve(later));
+                        if (later.Operation == "LOP_INSERT_ROWS" && later.TransactionId is not null)
+                            insertPageOfTx[later.TransactionId] = later.PageId;
+                        break;
+                    case "LOP_DELETE_ROWS":
+                        rowKeys.ObserveDelete(later);
+                        break;
+                    case "LOP_DELETE_SPLIT":
+                        if (later.TransactionId is not null &&
+                            insertPageOfTx.TryGetValue(later.TransactionId, out var splitTo) && splitTo != later.PageId)
+                            rowKeys.ObserveSplit(later.PageId, later.SlotId.Value, splitTo);
+                        else
+                            rowKeys.ForgetFromSlot(later.PageId, later.SlotId.Value);
+                        break;
+                }
+            }
         }
 
         // Pass 1: where is each chain's row on its last-known page?
@@ -336,6 +368,22 @@ public static class RowImageAnchoring
             var last = chain[^1];
             string? hash = RowIdentity.KeyHash(last.RowLogContents3);
             if (!LiveIsAsOfTheBound(last, hash)) continue;
+
+            // A clustered row whose record carries no key hash (lock
+            // escalation) has no identity on the page by itself, but every
+            // move the log shows - slot shifts, splits, deletes - has been
+            // followed, so where it is now is known. The chain still has to
+            // verify against the bytes found there.
+            if (hash is null && last.Context != "LCX_HEAP")
+            {
+                if (rowKeys.PlaceOf(key) is { } place &&
+                    await PageAsync(place.Page) is { } placeRows &&
+                    placeRows.FirstOrDefault(r => r.SlotId == place.Slot &&
+                                                  r.RecordType is "PRIMARY_RECORD" or "FORWARDED_RECORD") is { } found)
+                    onLastPage[key] = found.Bytes;
+                continue;
+            }
+
             var rows = await PageAsync(last.PageId!);
             byte[]? image = rows is null ? null : PickRow(rows, last, hash, SlotMayHaveChanged);
             if (image is not null)

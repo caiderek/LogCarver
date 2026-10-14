@@ -85,15 +85,26 @@ public class RowTrackingTests
 
     // ---- anchoring: what counts as evidence of identity ----------------------
     [Fact]
-    public async Task Anchor_ClusteredRecordWithoutAKeyHash_NeverTakesTheRowAtItsSlot()
+    public async Task Anchor_ClusteredRecordWithoutAKeyHash_UsesTheRowWhereTheLogSaysItIsNow()
     {
-        // The slot may have shifted since: another row's image, which
-        // happens to carry the same new bytes, must not become the seed.
         var source = new FakeSource(new() { ["0001:F8"] = [Row(1, After, "AAAAAAAAAAAA")] });
+        var update = ModifyColumns("00000002", "0001:F8", 1, lockInfoHex: null);
 
-        var seeds = await SeedsAsync(source, [ModifyColumns("00000002", "0001:F8", 1, lockInfoHex: null)]);
+        // Nothing in the log moved the row: it is at slot 1 still.
+        var seeds = await SeedsAsync(source, [update]);
+        Assert.Equal(Before, Convert.ToHexString(Assert.Single(seeds.Values).Bytes));
 
-        Assert.Empty(seeds);
+        // An INSERT at a lower slot pushed it to slot 2: slot 1 is another
+        // row's now (same new bytes by construction here), and it is not taken.
+        var pushed = await SeedsAsync(source,
+            [update, Insert("00000003", "0001:F8", 0, WithA(Before, 0x63), OtherHashLockInfo, tx: "T2")]);
+        Assert.Empty(pushed);
+
+        // The same, but the row is where the log has moved it to.
+        var moved = new FakeSource(new() { ["0001:F8"] = [Row(1, WithA(Before, 0x63), "BBBBBBBBBBBB"), Row(2, After, "AAAAAAAAAAAA")] });
+        var found = await SeedsAsync(moved,
+            [update, Insert("00000003", "0001:F8", 0, WithA(Before, 0x63), OtherHashLockInfo, tx: "T2")]);
+        Assert.Equal(Before, Convert.ToHexString(Assert.Single(found.Values).Bytes));
     }
 
     [Fact]

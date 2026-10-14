@@ -29,6 +29,10 @@ public sealed class RowKeyIndex
     private readonly Dictionary<string, Dictionary<int, string>> _slotsByPage = [];
     private readonly Dictionary<string, (string Page, int Slot)> _placeByKey = [];
 
+    /// <summary>Where the row is believed to be now, or null if that is not known.</summary>
+    public (string Page, int Slot)? PlaceOf(string key) =>
+        _placeByKey.TryGetValue(key, out var place) ? place : null;
+
     /// <summary>The row currently believed to sit at this slot, or null.</summary>
     public string? KeyAt(string pageId, int slot) =>
         _slotsByPage.TryGetValue(pageId, out var slots) && slots.TryGetValue(slot, out var key) ? key : null;
