@@ -100,9 +100,22 @@ public static class RowImageAnchoring
         var deletesByPage = new Dictionary<string, List<LogRecord>>();
         var churnByPage = new Dictionary<string, List<(string Lsn, int Slot, bool Clustered)>>();
 
+        // A page formatted by something other than an insert or a split (an
+        // index rebuild, say) puts rows where the log has no per-row record:
+        // where a row is "now" cannot be followed then.
+        var formatTx = new HashSet<string>();
+        var insertOrSplitTx = new HashSet<string>();
+
         foreach (var record in recordsInLsnOrder)
         {
+            if (record.TransactionId is not null)
+            {
+                if (record.Operation == "LOP_FORMAT_PAGE") formatTx.Add(record.TransactionId);
+                else if (record.Operation is "LOP_INSERT_ROWS" or "LOP_DELETE_SPLIT") insertOrSplitTx.Add(record.TransactionId);
+            }
+
             if (record.PageId is null || record.SlotId is null) continue;
+            if (record.Operation == "LOP_FORMAT_PAGE") continue;
             string key = rowKeys.Resolve(record);
             if (record.Operation is "LOP_INSERT_ROWS" or "LOP_MODIFY_ROW" or "LOP_MODIFY_COLUMNS")
                 rowKeys.Observe(record, key);
@@ -120,11 +133,22 @@ public static class RowImageAnchoring
                     churnByPage[record.PageId] = splitChurn = [];
                 splitChurn.Add((record.Lsn, record.SlotId.Value, true));
 
-                if (record.TransactionId is not null &&
-                    lastInsertPageOfTx.TryGetValue(record.TransactionId, out var newPage) && newPage != record.PageId)
-                    rowKeys.ObserveSplit(record.PageId, record.SlotId.Value, newPage);
+                if (record.IsCompensation)
+                {
+                    rowKeys.ForgetFromSlot(record.PageId, 0);
+                    if (record.TransactionId is not null && lastInsertPageOfTx.TryGetValue(record.TransactionId, out var undonePage))
+                        rowKeys.ForgetFromSlot(undonePage, 0);
+                }
+                else if (record.TransactionId is not null &&
+                         lastInsertPageOfTx.TryGetValue(record.TransactionId, out var newPage) && newPage != record.PageId &&
+                         rowKeys.ObserveSplit(record.PageId, record.SlotId.Value, newPage) is not null)
+                {
+                    // moved
+                }
                 else
+                {
                     rowKeys.ForgetFromSlot(record.PageId, record.SlotId.Value);
+                }
                 continue;
             }
 
@@ -330,6 +354,7 @@ public static class RowImageAnchoring
         // The row index has followed every record up to the bound; carry it
         // through what happened after, so that "where is this row now" holds
         // for rows that have no key hash (see below) as well.
+        var layoutChangedKeys = new HashSet<string>();
         if (logWasBounded && recordsAfterBound is not null)
         {
             var insertPageOfTx = new Dictionary<string, string>();
@@ -339,19 +364,35 @@ public static class RowImageAnchoring
                 switch (later.Operation)
                 {
                     case "LOP_INSERT_ROWS" or "LOP_MODIFY_ROW" or "LOP_MODIFY_COLUMNS":
-                        rowKeys.Observe(later, rowKeys.Resolve(later));
+                    {
+                        string laterKey = rowKeys.Resolve(later);
+                        if (later.Operation != "LOP_INSERT_ROWS" && ChangesRowLayout(later))
+                            layoutChangedKeys.Add(laterKey);
+                        rowKeys.Observe(later, laterKey);
                         if (later.Operation == "LOP_INSERT_ROWS" && later.TransactionId is not null)
                             insertPageOfTx[later.TransactionId] = later.PageId;
                         break;
+                    }
                     case "LOP_DELETE_ROWS":
                         rowKeys.ObserveDelete(later);
                         break;
                     case "LOP_DELETE_SPLIT":
-                        if (later.TransactionId is not null &&
-                            insertPageOfTx.TryGetValue(later.TransactionId, out var splitTo) && splitTo != later.PageId)
-                            rowKeys.ObserveSplit(later.PageId, later.SlotId.Value, splitTo);
+                        if (later.IsCompensation)
+                        {
+                            rowKeys.ForgetFromSlot(later.PageId, 0);
+                            if (later.TransactionId is not null && insertPageOfTx.TryGetValue(later.TransactionId, out var undone))
+                                rowKeys.ForgetFromSlot(undone, 0);
+                        }
+                        else if (later.TransactionId is not null &&
+                                 insertPageOfTx.TryGetValue(later.TransactionId, out var splitTo) && splitTo != later.PageId &&
+                                 rowKeys.ObserveSplit(later.PageId, later.SlotId.Value, splitTo) is not null)
+                        {
+                            // moved
+                        }
                         else
+                        {
                             rowKeys.ForgetFromSlot(later.PageId, later.SlotId.Value);
+                        }
                         break;
                 }
             }
@@ -376,6 +417,7 @@ public static class RowImageAnchoring
             // verify against the bytes found there.
             if (hash is null && last.Context != "LCX_HEAP")
             {
+                if (!formatTx.All(insertOrSplitTx.Contains)) continue;
                 if (rowKeys.PlaceOf(key) is { } place &&
                     await PageAsync(place.Page) is { } placeRows &&
                     placeRows.FirstOrDefault(r => r.SlotId == place.Slot &&
@@ -420,6 +462,11 @@ public static class RowImageAnchoring
             var candidates = new List<(string Source, byte[] Image, string? DeleteLsn)>();
 
             if (onLastPage.TryGetValue(key, out var live) && live is not null &&
+                // A later UPDATE that changed the row's length shifts every
+                // byte behind it: this chain's offsets then address other
+                // bytes of the present row. Only a chain that lies wholly in
+                // the fixed-length part is unaffected by that.
+                (!layoutChangedKeys.Contains(key) || ChainStaysInFixedRegion(chain, live)) &&
                 UndoChain(live, chain) is { } fromLive)
                 candidates.Add(("live", fromLive, null));
 
@@ -453,6 +500,69 @@ public static class RowImageAnchoring
         }
 
         return seeds;
+    }
+
+    /// <summary>
+    /// Whether this UPDATE may have changed the row's length (so moved the
+    /// bytes behind its change). LOP_MODIFY_ROW replaces a span: the length
+    /// changed if the old and new spans differ in size. LOP_MODIFY_COLUMNS is
+    /// a list of edits; one whose offset differs between the old and new row
+    /// shows an earlier edit changed the length, and its last edit's new
+    /// length is not stored, so it is only taken as length-neutral when every
+    /// offset pair is equal and each old block is the same padded size as the
+    /// new block.
+    /// </summary>
+    private static bool ChangesRowLayout(LogRecord record)
+    {
+        if (record.Operation == "LOP_MODIFY_ROW")
+            return record.RowLogContents0 is not { } o || record.RowLogContents1 is not { } n || o.Length != n.Length;
+
+        if (record.RowLogContents0 is not { } r0 || record.RowLogContents1 is not { } r1 || record.RowLogContents4 is not { } r4)
+            return true;
+        int edits = r1.Length / 2;
+        if (r0.Length < edits * 4) return true;
+        int paddedOld = 0;
+        for (int i = 0; i < edits; i++)
+        {
+            if (BitConverter.ToUInt16(r0, i * 4) != BitConverter.ToUInt16(r0, i * 4 + 2)) return true;
+            int oldLength = BitConverter.ToUInt16(r1, i * 2);
+            paddedOld += (oldLength + 3) / 4 * 4;
+        }
+        return r4.Length != paddedOld * 2;
+    }
+
+    /// <summary>
+    /// Every byte this chain changed lies before the end of the row's
+    /// fixed-length data (the uint16 at byte 2 of the row), where no change of
+    /// a variable-length column can move it.
+    /// </summary>
+    private static bool ChainStaysInFixedRegion(IReadOnlyList<LogRecord> chain, byte[] row)
+    {
+        if (row.Length < 4) return false;
+        int fixedEnd = BitConverter.ToUInt16(row, 2);
+        foreach (var record in chain)
+        {
+            if (record.Operation == "LOP_MODIFY_ROW")
+            {
+                if (record.OffsetInRow is not int offset || record.RowLogContents1 is not { } n ||
+                    record.RowLogContents0 is not { } o || o.Length != n.Length || offset < 0 || offset + n.Length > fixedEnd)
+                    return false;
+            }
+            else
+            {
+                if (record.RowLogContents0 is not { } r0 || record.RowLogContents1 is not { } r1) return false;
+                int edits = r1.Length / 2;
+                if (r0.Length < edits * 4) return false;
+                for (int i = 0; i < edits; i++)
+                {
+                    int oldOffset = BitConverter.ToUInt16(r0, i * 4);
+                    int newOffset = BitConverter.ToUInt16(r0, i * 4 + 2);
+                    int oldLength = BitConverter.ToUInt16(r1, i * 2);
+                    if (oldOffset != newOffset || oldOffset + oldLength > fixedEnd) return false;
+                }
+            }
+        }
+        return true;
     }
 
     /// <summary>

@@ -124,18 +124,27 @@ public sealed class RowKeyIndex
     /// logged at the new page's slot 0 had been given, if any - that INSERT is
     /// the first moved row itself, not a new row.
     /// </summary>
-    public (IReadOnlyList<string> Moved, string? PhantomAtSlotZero) ObserveSplit(string oldPage, int fromSlot, string newPage)
+    public (IReadOnlyList<string> Moved, string? PhantomAtSlotZero, string? KeyAtSlotZero)? ObserveSplit(
+        string oldPage, int fromSlot, string newPage)
     {
+        // A freshly formatted page holds at most the first moved row (the
+        // INSERT logged at slot 0). Anything else on it means the page is not
+        // the split's new page, and nothing is modelled.
         string? phantom = null;
-        if (!_slotsByPage.TryGetValue(newPage, out var target))
-            _slotsByPage[newPage] = target = [];
-        else if (target.TryGetValue(0, out var atZero))
-            phantom = atZero;
-        foreach (var key in target.Values.ToList())
-            _placeByKey.Remove(key);
-        target.Clear();
+        if (_slotsByPage.TryGetValue(newPage, out var existing))
+        {
+            if (existing.Keys.Any(slot => slot != 0))
+                return null;
+            if (existing.TryGetValue(0, out var atZero))
+                phantom = atZero;
+        }
+
+        var target = _slotsByPage[newPage] = [];
+        if (phantom is not null)
+            _placeByKey.Remove(phantom);
 
         var moved = new List<string>();
+        string? keyAtZero = null;
         if (_slotsByPage.TryGetValue(oldPage, out var source))
         {
             foreach (var (slot, key) in source.Where(kv => kv.Key >= fromSlot).OrderBy(kv => kv.Key).ToList())
@@ -145,9 +154,18 @@ public sealed class RowKeyIndex
                 target[newSlot] = key;
                 _placeByKey[key] = (newPage, newSlot);
                 moved.Add(key);
+                if (newSlot == 0) keyAtZero = key;
             }
         }
-        return (moved, phantom);
+
+        // The INSERT at slot 0 is a row on that page whatever else is known:
+        // when no tracked row moved to slot 0 it stays what it was.
+        if (phantom is not null && !target.ContainsKey(0))
+        {
+            target[0] = phantom;
+            _placeByKey[phantom] = (newPage, 0);
+        }
+        return (moved, phantom, keyAtZero);
     }
 
     /// <summary>

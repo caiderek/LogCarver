@@ -116,7 +116,8 @@ public static class RowHistoryReconstructor
         // The latest INSERT of each transaction: a page split logs the first
         // moved row as an INSERT on the new page, and its LOP_DELETE_SPLIT
         // (same transaction) says where the rest went.
-        var lastInsertOfTx = new Dictionary<string, (string PageId, int EventIndex, string Key)>();
+        var lastInsertOfTx = new Dictionary<string, string>();
+        var insertEventOfKey = new Dictionary<string, int>();
         var undoStack = new Dictionary<string, Stack<(int Event, string Operation, string PageId, int Slot)>>();
         var cancelled = new HashSet<int>();
         // Transactions with a compensation record that is not the inverse of
@@ -200,28 +201,42 @@ public static class RowHistoryReconstructor
                 // them, not a new row.
                 case "LOP_DELETE_SPLIT":
                     {
-                        if (record.TransactionId is not null &&
-                            lastInsertOfTx.TryGetValue(record.TransactionId, out var firstMoved) &&
-                            firstMoved.PageId != record.PageId)
+                        // The rollback of a split puts the rows back and frees
+                        // the new page: nothing about either page is known
+                        // afterwards.
+                        if (record.IsCompensation)
                         {
-                            var (moved, phantom) = rowKeys.ObserveSplit(record.PageId, record.SlotId.Value, firstMoved.PageId);
+                            rowKeys.ForgetFromSlot(record.PageId, 0);
+                            if (record.TransactionId is not null && lastInsertOfTx.TryGetValue(record.TransactionId, out var undonePage))
+                                rowKeys.ForgetFromSlot(undonePage, 0);
+                            break;
+                        }
+
+                        if (record.TransactionId is not null &&
+                            lastInsertOfTx.TryGetValue(record.TransactionId, out var newPageId) &&
+                            newPageId != record.PageId &&
+                            rowKeys.ObserveSplit(record.PageId, record.SlotId.Value, newPageId) is { } split)
+                        {
+                            var (moved, phantom, keyAtZero) = split;
                             foreach (var movedKey in moved)
                             {
-                                if (state.TryGetValue(movedKey, out var movedState) && movedState.PageId != firstMoved.PageId)
-                                    Remember(movedKey, firstMoved.PageId, movedState with { PageId = firstMoved.PageId });
+                                if (state.TryGetValue(movedKey, out var movedState) && movedState.PageId != newPageId)
+                                    Remember(movedKey, newPageId, movedState with { PageId = newPageId });
                             }
 
-                            // The phantom INSERT is the row at new slot 0 only if
-                            // its bytes are that row's; otherwise it is left as
-                            // reported rather than guessed away.
-                            if (phantom is not null && moved.Count > 0 && phantom != moved[0] &&
+                            // The phantom INSERT is the row now at new slot 0 only
+                            // if its bytes are that row's; otherwise it is left as
+                            // reported rather than guessed away. The event to
+                            // cancel is the phantom's own INSERT.
+                            if (phantom is not null && keyAtZero is not null && phantom != keyAtZero &&
+                                insertEventOfKey.TryGetValue(phantom, out var phantomEvent) &&
                                 state.TryGetValue(phantom, out var phantomState) &&
-                                state.TryGetValue(moved[0], out var firstState) &&
+                                state.TryGetValue(keyAtZero, out var firstState) &&
                                 phantomState.Bytes.AsSpan().SequenceEqual(firstState.Bytes))
                             {
-                                cancelled.Add(firstMoved.EventIndex);
+                                cancelled.Add(phantomEvent);
                                 state.Remove(phantom);
-                                if (rowsByPage.TryGetValue(firstMoved.PageId, out var newPageKeys))
+                                if (rowsByPage.TryGetValue(newPageId, out var newPageKeys))
                                     newPageKeys.Remove(phantom);
                             }
                         }
@@ -234,6 +249,9 @@ public static class RowHistoryReconstructor
 
                 case "LOP_INSERT_ROWS" when record.RowLogContents0 is { Length: > 0 } bytes:
                     {
+                        if (record.TransactionId is not null)
+                            lastInsertOfTx[record.TransactionId] = record.PageId;
+
                         // A heap row that no longer fits where it is gets moved:
                         // the log shows a forwarded copy of its old image being
                         // "inserted" elsewhere, followed by the real change. The
@@ -264,8 +282,7 @@ public static class RowHistoryReconstructor
                         if (corruptedColumns.Count > 0) note = WithNote(note, BuildColumnCorruptionNote(corruptedColumns));
                         events.Add(new RowEvent(record.Lsn, RowEventKind.Insert, null, decoded, note, TimestampOf(record), record.PageId, record.SlotId.Value, record.TransactionId));
                         Remember(key, record.PageId, new RowState(bytes, record.Lsn, recordTouchedABoundary, record.PageId));
-                        if (record.TransactionId is not null)
-                            lastInsertOfTx[record.TransactionId] = (record.PageId, events.Count - 1, key);
+                        insertEventOfKey[key] = events.Count - 1;
                         break;
                     }
 

@@ -342,10 +342,12 @@ public class RowTrackingTests
 
         Assert.Equal(0, await Count(null));                          // unknown: no seed
         Assert.Equal(1, await Count([]));                            // nothing happened since
-        Assert.Equal(1, await Count([                                // someone updated it again
-            ModifyColumns("00000009", "0001:F8", 1, tx: "T9")]));
-        Assert.Equal(1, await Count([                                // a hash-less update (lock escalation)
-            ModifyColumns("00000009", "0001:F8", 1, lockInfoHex: null, tx: "T9")]));
+        Assert.Equal(1, await Count([                                // someone updated another column, same length
+            ModifyRow("00000009", "0001:F8", 1, "0B000000", "0C000000", HashLockInfo, tx: "T9", context: "LCX_CLUSTERED")]));
+        Assert.Equal(1, await Count([                                // a hash-less update (lock escalation), same length
+            ModifyRow("00000009", "0001:F8", 1, "0B000000", "0C000000", null, tx: "T9", context: "LCX_CLUSTERED")]));
+        Assert.Equal(0, await Count([                                // a later update that changed the row's length:
+            ModifyColumns("00000009", "0001:F8", 1, tx: "T9")]));    // this chain's offsets are not trustworthy
         Assert.Equal(1, await Count([                                // moved by a page split: no DELETE
             Insert("00000009", "0001:F9", 0, After, HashLockInfo, tx: "T9")]));
         Assert.Equal(1, await Count([                                // other rows come and go
@@ -392,6 +394,64 @@ public class RowTrackingTests
             ModifyRow("00000009", "0001:F8", 5, "01000000", "02000000", HeapLockInfo, tx: "T9")]));
         Assert.Equal(0, await Count([Delete("00000009", "0001:F8", 3, after, tx: "T9", context: "LCX_HEAP")]));
         Assert.Equal(0, await Count([Insert("00000009", "0001:F8", 3, Before, tx: "T9", context: "LCX_HEAP")]));
+    }
+
+    [Fact]
+    public async Task Anchor_BoundedLog_ChainInTheFixedRegionIsUnaffectedByALaterLengthChange()
+    {
+        // The chain only changed A (fixed length, offset 8). A later update
+        // that lengthened a variable column moves bytes behind it, not A.
+        var source = new FakeSource(new() { ["0001:F8"] = [Row(1, After, "61A06ABD401C")] });
+        var chain = new List<LogRecord>
+        {
+            ModifyRow("00000002", "0001:F8", 1, "0A000000", "0B000000", HashLockInfo, context: "LCX_CLUSTERED"),
+        };
+        var later = new List<LogRecord> { ModifyColumns("00000009", "0001:F8", 1, tx: "T9") };
+
+        var seeds = await RowImageAnchoring.BuildSeedsAsync(source, chain, default, null, true, later);
+
+        Assert.Single(seeds);
+    }
+
+    [Fact]
+    public void Tracking_RolledBackSplit_LeavesNoTrustedMapping()
+    {
+        LogRecord[] records =
+        [
+            Insert("00000001", "0001:F8", 0, WithA(Before, 0x01), tx: "T0"),
+            Insert("00000002", "0001:F8", 1, WithA(Before, 0x02), tx: "T0"),
+            Insert("00000003", "0001:F8", 2, Before, tx: "T0"),
+            Insert("00000010", "0001:F9", 0, WithA(Before, 0x02), tx: "SYS"),
+            new LogRecord("00000011", "LOP_DELETE_SPLIT", "LCX_CLUSTERED", null, "dbo.T.PK", "0001:F8", 1, "SYS", null, null),
+            // the split is rolled back: the rows are back on F8
+            new LogRecord("00000012", "LOP_DELETE_SPLIT", "LCX_CLUSTERED", null, "dbo.T.PK", "0001:F8", 1, "SYS", null, null, IsCompensation: true),
+            ModifyColumns("00000020", "0001:F9", 1, tx: "T1"),
+        ];
+
+        var history = RowHistoryReconstructor.Reconstruct(records, Schema, ddlBoundaryLsns: []);
+
+        var update = Assert.Single(history, e => e.Kind == RowEventKind.Update);
+        Assert.Null(update.After);                 // not applied to whatever F9 slot 1 might be
+        Assert.True(update.NeedsManualReview);
+    }
+
+    [Fact]
+    public void Tracking_SplitWhoseNewPageAlreadyHoldsOtherRows_IsNotModelled_AndNoInsertIsCancelled()
+    {
+        LogRecord[] records =
+        [
+            Insert("00000001", "0001:F8", 0, WithA(Before, 0x01), tx: "T0"),
+            Insert("00000002", "0001:F8", 1, WithA(Before, 0x02), tx: "T0"),
+            Insert("00000003", "0001:F8", 2, Before, tx: "T0"),
+            // F9 already holds a real row of this transaction at slot 1, then the "split"
+            Insert("00000010", "0001:F9", 0, WithA(Before, 0x02), tx: "SYS"),
+            Insert("00000011", "0001:F9", 1, WithA(Before, 0x77), tx: "SYS"),
+            new LogRecord("00000012", "LOP_DELETE_SPLIT", "LCX_CLUSTERED", null, "dbo.T.PK", "0001:F8", 1, "SYS", null, null),
+        ];
+
+        var history = RowHistoryReconstructor.Reconstruct(records, Schema, ddlBoundaryLsns: []);
+
+        Assert.Equal(5, history.Count(e => e.Kind == RowEventKind.Insert));
     }
 
     [Fact]
