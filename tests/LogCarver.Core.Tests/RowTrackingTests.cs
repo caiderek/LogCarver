@@ -321,6 +321,42 @@ public class RowTrackingTests
     }
 
     [Fact]
+    public async Task Anchor_BoundedLog_UsesTheLivePageOnlyWhenNothingAfterTheBoundCouldBeTheRow()
+    {
+        var source = new FakeSource(new() { ["0001:F8"] = [Row(1, After, "61A06ABD401C")] });
+        var chain = new List<LogRecord> { ModifyColumns("00000002", "0001:F8", 1) };
+
+        async Task<int> Count(IReadOnlyList<LogRecord>? later) =>
+            (await RowImageAnchoring.BuildSeedsAsync(source, chain, default, null, logWasBounded: true, recordsAfterBound: later)).Count;
+
+        Assert.Equal(0, await Count(null));                          // unknown: no seed
+        Assert.Equal(1, await Count([]));                            // nothing happened since
+        Assert.Equal(1, await Count([                                // another row's change
+            ModifyColumns("00000009", "0001:F8", 7, lockInfoHex: OtherHashLockInfo, tx: "T9")]));
+        Assert.Equal(0, await Count([                                // this key, again
+            ModifyColumns("00000009", "0001:F8", 1, tx: "T9")]));
+        Assert.Equal(0, await Count([                                // key re-inserted
+            Insert("00000009", "0001:F9", 0, After, HashLockInfo, tx: "T9")]));
+        Assert.Equal(0, await Count([                                // could be anyone's
+            ModifyColumns("00000009", "0001:F8", 7, lockInfoHex: null, tx: "T9")]));
+    }
+
+    [Fact]
+    public async Task Anchor_BoundedLog_HeapRowNeedsAQuietPage()
+    {
+        string after = WithA(Before, 0x0B);
+        var update = ModifyRow("00000002", "0001:F8", 3, "0A000000", "0B000000", HeapLockInfo);
+        var source = new FakeSource(new() { ["0001:F8"] = [Row(3, after, null)] });
+
+        var quiet = await RowImageAnchoring.BuildSeedsAsync(source, [update], default, null, true, []);
+        Assert.Single(quiet);
+
+        var busy = await RowImageAnchoring.BuildSeedsAsync(source, [update], default, null, true,
+            [Delete("00000009", "0001:F8", 3, after, tx: "T9", context: "LCX_HEAP")]);
+        Assert.Empty(busy);
+    }
+
+    [Fact]
     public async Task Anchor_OnlyTheRequestedTransactionsRowsAreAnchored()
     {
         var source = new FakeSource(new() { ["0001:F8"] = [Row(1, After, "61A06ABD401C")] });

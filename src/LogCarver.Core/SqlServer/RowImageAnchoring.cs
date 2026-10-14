@@ -49,8 +49,9 @@ public static class RowImageAnchoring
 {
     public static Task<IReadOnlyDictionary<string, RowImageSeed>> BuildSeedsAsync(
         SqlConnection connection, string tableName, IReadOnlyList<LogRecord> recordsInLsnOrder,
-        CancellationToken ct = default, string? onlyTransactionId = null, bool logWasBounded = false) =>
-        BuildSeedsAsync(new SqlAnchorSource(connection, tableName), recordsInLsnOrder, ct, onlyTransactionId, logWasBounded);
+        CancellationToken ct = default, string? onlyTransactionId = null, bool logWasBounded = false,
+        IReadOnlyList<LogRecord>? recordsAfterBound = null) =>
+        BuildSeedsAsync(new SqlAnchorSource(connection, tableName), recordsInLsnOrder, ct, onlyTransactionId, logWasBounded, recordsAfterBound);
 
     /// <param name="onlyTransactionId">
     /// When given, only rows this transaction touched are anchored: an undo
@@ -58,14 +59,21 @@ public static class RowImageAnchoring
     /// </param>
     /// <param name="logWasBounded">
     /// The records stop at some LSN (a transaction's commit) although the log
-    /// goes on. A heap row has no key hash, so the data page's slot is only
-    /// trusted if nothing touched that slot since the change - which cannot be
-    /// known past the bound: the row may have been deleted and another row
-    /// put in the same slot. Heap rows are then not anchored from the page.
+    /// goes on. The data page shows the row as it is NOW, so it is only
+    /// evidence of the row as of the bound if nothing touched the row after it.
+    /// </param>
+    /// <param name="recordsAfterBound">
+    /// The table's records after the bound. With a bounded log, a row is
+    /// anchored from its data page only when none of them can be this row's:
+    /// none carries its key hash, and none is a hash-less INSERT/UPDATE that
+    /// could be it (a heap row, which has no hash, must have had no record at
+    /// all on its page). Null means that is not known, so no row is anchored
+    /// from its page.
     /// </param>
     public static async Task<IReadOnlyDictionary<string, RowImageSeed>> BuildSeedsAsync(
         IAnchorSource source, IReadOnlyList<LogRecord> recordsInLsnOrder,
-        CancellationToken ct = default, string? onlyTransactionId = null, bool logWasBounded = false)
+        CancellationToken ct = default, string? onlyTransactionId = null, bool logWasBounded = false,
+        IReadOnlyList<LogRecord>? recordsAfterBound = null)
     {
         var seeds = new Dictionary<string, RowImageSeed>();
 
@@ -246,6 +254,36 @@ public static class RowImageAnchoring
             return rows;
         }
 
+        // With a bounded log: could anything after the bound have been this row?
+        HashSet<string>? hashesAfter = null;
+        HashSet<string>? pagesAfter = null;
+        bool unattributableAfter = false;
+        if (logWasBounded && recordsAfterBound is not null)
+        {
+            hashesAfter = [];
+            pagesAfter = [];
+            foreach (var later in recordsAfterBound)
+            {
+                if (later.PageId is not null) pagesAfter.Add(later.PageId);
+                string? laterHash = RowIdentity.KeyHash(RowIdentity.LockInformation(later));
+                if (laterHash is not null)
+                    hashesAfter.Add(laterHash);
+                else if (later.Operation is "LOP_INSERT_ROWS" or "LOP_MODIFY_ROW" or "LOP_MODIFY_COLUMNS")
+                    unattributableAfter = true; // could be any row, hashed or not
+            }
+        }
+
+        bool LiveIsAsOfTheBound(LogRecord last, string? hash)
+        {
+            if (!logWasBounded) return true;
+            if (hashesAfter is null || pagesAfter is null) return false;
+            if (hash is not null)
+                return !hashesAfter.Contains(hash) && !unattributableAfter;
+            // No hash (a heap row): its slot is only the row's if nothing at
+            // all happened on that page afterwards.
+            return !pagesAfter.Contains(last.PageId!);
+        }
+
         // Pass 1: where is each chain's row on its last-known page?
         var onLastPage = new Dictionary<string, byte[]?>();
         var unlocated = new List<string>();
@@ -256,8 +294,9 @@ public static class RowImageAnchoring
 
             var last = chain[^1];
             string? hash = RowIdentity.KeyHash(last.RowLogContents3);
+            if (!LiveIsAsOfTheBound(last, hash)) continue;
             var rows = await PageAsync(last.PageId!);
-            byte[]? image = rows is null ? null : PickRow(rows, last, hash, SlotMayHaveChanged, logWasBounded);
+            byte[]? image = rows is null ? null : PickRow(rows, last, hash, SlotMayHaveChanged);
             if (image is not null)
                 onLastPage[key] = image;
             else if (hash is not null)
@@ -334,7 +373,7 @@ public static class RowImageAnchoring
     /// </summary>
     private static byte[]? PickRow(
         IReadOnlyList<PageRow> rows, LogRecord last, string? hash,
-        Func<string, int, bool, string, string, bool> slotMayHaveChanged, bool logWasBounded)
+        Func<string, int, bool, string, string, bool> slotMayHaveChanged)
     {
         var present = rows.Where(r => r.RecordType is "PRIMARY_RECORD" or "FORWARDED_RECORD").ToList();
 
@@ -346,9 +385,6 @@ public static class RowImageAnchoring
 
         if (last.Context != "LCX_HEAP")
             return null; // a clustered row with no hash has no identity on the page
-
-        if (logWasBounded)
-            return null; // what happened to the slot after the bound is not visible
 
         // The upper bound is "now": everything after the change counts.
         if (slotMayHaveChanged(last.PageId!, last.SlotId!.Value, false, last.Lsn, "\uffff"))
