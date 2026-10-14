@@ -59,8 +59,10 @@ public class HeapForwardingTests
 
         var forwarded = Forwarded(H(Row), 0x0A);
         Assert.True(RowFormat.IsForwardedRecord(forwarded));
-        Assert.Equal("P:0001:00000198:1", RowFormat.ForwardedFromKey(forwarded));
-        Assert.Null(RowFormat.ForwardedFromKey(H(Row)));
+        Assert.True(RowFormat.TryGetForwardedFrom(forwarded, out var fromPage, out var fromSlot));
+        Assert.Equal("0001:00000198", fromPage);
+        Assert.Equal(1, fromSlot);
+        Assert.False(RowFormat.TryGetForwardedFrom(H(Row), out _, out _));
     }
 
     [Fact]

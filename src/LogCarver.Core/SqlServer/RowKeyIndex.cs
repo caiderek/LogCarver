@@ -6,49 +6,82 @@ namespace LogCarver.Core.SqlServer;
 ///   - the key hash, present on most INSERT and UPDATE records of a clustered
 ///     row but NOT on all of them (for instance rows inserted after a large
 ///     statement escalated to a table lock carry no lock information), and
-///   - the (page, slot) it was logged at, which is what every record has but
-///     which moves when a page splits or other rows are inserted.
+///   - the (page, slot) it was logged at, which every record has.
 ///
-/// A row is tracked under whichever key it was first seen with. When a record
-/// with a hash arrives for a slot that is already tracked (and that tracked row
-/// has no different hash), the hash is linked to it, so later records follow
-/// the row through slot changes. A hash seen for the first time at a slot that
-/// is not tracked starts a new row. The index is only a pointer: the caller
-/// still verifies the logged old bytes against the row's known image before
-/// applying anything, so a wrong link can only cause a refusal.
+/// The slot is only evidence while it is still the row's slot, so the index
+/// follows what the log says about slots: an INSERT into a clustered page
+/// pushes every row at or after its slot up by one, a physical DELETE pulls
+/// them back down (a ghosted delete leaves the row where it is), and a heap's
+/// slots never move. What it cannot see - a page split moving rows to another
+/// page - is not modelled, so a slot entry can still go stale; that is why
+/// the caller verifies the logged old bytes against the row's known image
+/// before applying anything. That check is not proof of identity for a short
+/// field, so slot evidence is only ever used to attach a hash to a row that
+/// has none yet, never to override a hash already known.
+///
+/// A row is tracked under whichever key it was first seen with: its hash if
+/// it had one, otherwise a name built from where and when it first appeared.
 /// </summary>
 public sealed class RowKeyIndex
 {
     private readonly Dictionary<string, string> _keyByHash = [];
     private readonly Dictionary<string, string> _hashByKey = [];
-    private readonly Dictionary<string, string> _keyBySlot = [];
+    private readonly Dictionary<string, Dictionary<int, string>> _slotsByPage = [];
+    private readonly Dictionary<string, (string Page, int Slot)> _placeByKey = [];
 
-    private static string SlotOf(LogRecord record) => $"P:{record.PageId}:{record.SlotId}";
+    /// <summary>The row currently believed to sit at this slot, or null.</summary>
+    public string? KeyAt(string pageId, int slot) =>
+        _slotsByPage.TryGetValue(pageId, out var slots) && slots.TryGetValue(slot, out var key) ? key : null;
 
     public string Resolve(LogRecord record)
     {
-        string slot = SlotOf(record);
         string? hash = RowIdentity.KeyHash(RowIdentity.LockInformation(record));
 
+        // An INSERT is a new row at that slot; the row that used to be there
+        // is about to be pushed along, it is not this one.
+        if (record.Operation == "LOP_INSERT_ROWS")
+        {
+            if (hash is not null && _keyByHash.TryGetValue(hash, out var movedRow))
+                return movedRow;
+            return hash is not null
+                ? $"H:{record.AllocUnitName}:{hash}"
+                : $"P:{record.PageId}:{record.SlotId}@{record.Lsn}";
+        }
+
+        string? atSlot = KeyAt(record.PageId!, record.SlotId!.Value);
         if (hash is not null)
         {
             if (_keyByHash.TryGetValue(hash, out var known))
                 return known;
 
-            if (_keyBySlot.TryGetValue(slot, out var atSlot) &&
-                (!_hashByKey.TryGetValue(atSlot, out var otherHash) || otherHash == hash))
+            if (atSlot is not null && !_hashByKey.ContainsKey(atSlot))
                 return atSlot;
 
             return $"H:{record.AllocUnitName}:{hash}";
         }
 
-        return _keyBySlot.TryGetValue(slot, out var bySlot) ? bySlot : slot;
+        return atSlot ?? $"P:{record.PageId}:{record.SlotId}@{record.Lsn}";
     }
 
-    /// <summary>Record that <paramref name="record"/> was seen as the row <paramref name="key"/>.</summary>
+    /// <summary>Record that an INSERT or UPDATE <paramref name="record"/> was seen as the row <paramref name="key"/>.</summary>
     public void Observe(LogRecord record, string key)
     {
-        _keyBySlot[SlotOf(record)] = key;
+        string page = record.PageId!;
+        int slot = record.SlotId!.Value;
+
+        if (!_slotsByPage.TryGetValue(page, out var slots))
+            _slotsByPage[page] = slots = [];
+
+        // The row may have been tracked at another slot; that entry is stale.
+        if (_placeByKey.TryGetValue(key, out var old) && KeyAtIs(old.Page, old.Slot, key))
+            _slotsByPage[old.Page].Remove(old.Slot);
+
+        if (record.Operation == "LOP_INSERT_ROWS" && record.Context == "LCX_CLUSTERED")
+            ShiftUp(slots, slot);
+
+        slots[slot] = key;
+        _placeByKey[key] = (page, slot);
+
         string? hash = RowIdentity.KeyHash(RowIdentity.LockInformation(record));
         if (hash is not null)
         {
@@ -57,6 +90,49 @@ public sealed class RowKeyIndex
         }
     }
 
-    /// <summary>A row was removed from this slot.</summary>
-    public void ForgetSlot(LogRecord record) => _keyBySlot.Remove(SlotOf(record));
+    /// <summary>A DELETE of the row at this slot.</summary>
+    public void ObserveDelete(LogRecord record)
+    {
+        // A ghosted row stays on the page until it is cleaned up; only a
+        // physical removal changes what the slots mean.
+        if (record.Context == "LCX_MARK_AS_GHOST")
+            return;
+
+        if (!_slotsByPage.TryGetValue(record.PageId!, out var slots))
+            return;
+
+        int slot = record.SlotId!.Value;
+        if (slots.Remove(slot, out var removed))
+            _placeByKey.Remove(removed);
+
+        if (record.Context == "LCX_CLUSTERED")
+            ShiftDown(slots, slot);
+    }
+
+    private bool KeyAtIs(string page, int slot, string key) =>
+        _slotsByPage.TryGetValue(page, out var slots) && slots.TryGetValue(slot, out var k) && k == key;
+
+    private void ShiftUp(Dictionary<int, string> slots, int from)
+    {
+        foreach (var slot in slots.Keys.Where(s => s >= from).OrderByDescending(s => s).ToList())
+        {
+            string key = slots[slot];
+            slots.Remove(slot);
+            slots[slot + 1] = key;
+            if (_placeByKey.TryGetValue(key, out var place))
+                _placeByKey[key] = (place.Page, slot + 1);
+        }
+    }
+
+    private void ShiftDown(Dictionary<int, string> slots, int after)
+    {
+        foreach (var slot in slots.Keys.Where(s => s > after).OrderBy(s => s).ToList())
+        {
+            string key = slots[slot];
+            slots.Remove(slot);
+            slots[slot - 1] = key;
+            if (_placeByKey.TryGetValue(key, out var place))
+                _placeByKey[key] = (place.Page, slot - 1);
+        }
+    }
 }

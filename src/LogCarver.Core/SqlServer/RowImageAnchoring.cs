@@ -3,6 +3,19 @@ using Microsoft.Data.SqlClient;
 
 namespace LogCarver.Core.SqlServer;
 
+/// <summary>Where the anchoring step reads data pages and row locations from.</summary>
+public interface IAnchorSource
+{
+    /// <summary>The rows of a data page, or null when the page cannot be read.</summary>
+    Task<IReadOnlyList<PageRow>?> ReadPageAsync(string pageId, CancellationToken ct);
+
+    /// <summary>
+    /// Key hash (upper-case hex) to the page currently holding that row, for
+    /// the hashes that identify exactly one row; empty when it cannot be asked.
+    /// </summary>
+    Task<IReadOnlyDictionary<string, string>> LocateByKeyHashAsync(IReadOnlyList<string> hashes, CancellationToken ct);
+}
+
 /// <summary>
 /// Recovers the starting image of rows whose INSERT is not in the log, so that
 /// their UPDATEs - by far the common case for any row that is not brand new -
@@ -12,39 +25,55 @@ namespace LogCarver.Core.SqlServer;
 /// on its own; the reconstructor needs the row as it was before. When the
 /// row's INSERT (or an earlier UPDATE) has already left the log, that image is
 /// not there. But the row's image AFTER its last logged change is available:
-///   - from the data page, if the row still exists (found by its key hash,
-///     on the page it was last logged on or - if a page split moved it - on
-///     whichever page the table says it is on now), or
-///   - from the log itself, as the image of a later LOP_DELETE_ROWS.
+///   - from the data page, if the row still exists - found by its key hash, on
+///     the page it was last logged on or, if a page split moved it, on
+///     whichever page the table says it is on now (a heap row, which has no
+///     hash, only from the exact page and slot it was logged at and only if
+///     nothing was inserted at or deleted from that slot since), or
+///   - from the image of a later DELETE of the same page and slot when no
+///     insert or physical delete at that slot or a lower one happened on the
+///     page in between (those are the only things that move a clustered
+///     row's slot, so the slot cannot mean another row), or
+///   - from the row being re-inserted, byte for byte, by a page split.
 /// Undoing the row's logged changes from that image, newest first, gives the
 /// image before the first one.
 ///
 /// Nothing here is taken on trust. Undoing a change requires that the bytes
-/// the record says it wrote are really there; every step is checked, a row
-/// that does not verify gets no seed (its UPDATE is then reported as "before
-/// image unknown", as before), and a deleted row is only matched to a DELETE
-/// image when exactly one candidate verifies.
+/// the record says it wrote are really there, and the result must be a
+/// self-consistent row. Because that is not proof of identity for a short
+/// field, a seed is only given when exactly ONE source yields one: if the row
+/// could also have been deleted and re-inserted, or two DELETE images
+/// verify, there is no seed and the UPDATE stays "before image unknown".
 /// </summary>
 public static class RowImageAnchoring
 {
-    private const int HashLookupBatchSize = 500;
-
-    public static async Task<IReadOnlyDictionary<string, RowImageSeed>> BuildSeedsAsync(
+    public static Task<IReadOnlyDictionary<string, RowImageSeed>> BuildSeedsAsync(
         SqlConnection connection, string tableName, IReadOnlyList<LogRecord> recordsInLsnOrder,
+        CancellationToken ct = default, string? onlyTransactionId = null) =>
+        BuildSeedsAsync(new SqlAnchorSource(connection, tableName), recordsInLsnOrder, ct, onlyTransactionId);
+
+    /// <param name="onlyTransactionId">
+    /// When given, only rows this transaction touched are anchored: an undo
+    /// does not want a data page read for every old row anyone updated.
+    /// </param>
+    public static async Task<IReadOnlyDictionary<string, RowImageSeed>> BuildSeedsAsync(
+        IAnchorSource source, IReadOnlyList<LogRecord> recordsInLsnOrder,
         CancellationToken ct = default, string? onlyTransactionId = null)
     {
         var seeds = new Dictionary<string, RowImageSeed>();
-
-        // Per row identity: the UPDATEs seen before any INSERT of that row.
-        // A row with an INSERT in the window is already fully reconstructable.
-        var chains = new Dictionary<string, List<LogRecord>>();
-        var insertedKeys = new HashSet<string>();
-        var deletes = new List<LogRecord>();
 
         // The same row-tracking rules the reconstructor uses, so a chain here
         // is exactly the set of records the reconstructor will see without an
         // earlier image.
         var rowKeys = new RowKeyIndex();
+
+        // Per row: the changes seen before anything gave the reconstructor its
+        // image (no INSERT of it in the log).
+        var chains = new Dictionary<string, List<LogRecord>>();
+        var known = new HashSet<string>();
+        var reinserted = new Dictionary<string, LogRecord>();
+        var deletesByPage = new Dictionary<string, List<LogRecord>>();
+        var churnByPage = new Dictionary<string, List<(string Lsn, int Slot, bool Clustered)>>();
 
         foreach (var record in recordsInLsnOrder)
         {
@@ -53,20 +82,43 @@ public static class RowImageAnchoring
             if (record.Operation is "LOP_INSERT_ROWS" or "LOP_MODIFY_ROW" or "LOP_MODIFY_COLUMNS")
                 rowKeys.Observe(record, key);
             else if (record.Operation == "LOP_DELETE_ROWS")
-                rowKeys.ForgetSlot(record);
+                rowKeys.ObserveDelete(record);
+
+            if (record.Operation is "LOP_INSERT_ROWS" or "LOP_DELETE_ROWS")
+            {
+                if (!churnByPage.TryGetValue(record.PageId, out var churn))
+                    churnByPage[record.PageId] = churn = [];
+
+                // A clustered page's slots move when a row is inserted, or
+                // physically removed, at or below them. A ghosted delete leaves
+                // the row where it is; a heap's slots never move, they are
+                // only reused.
+                bool shifts = record.Context == "LCX_CLUSTERED";
+                bool slotReuse = record.Context == "LCX_HEAP";
+                if (shifts || slotReuse || record.Operation == "LOP_INSERT_ROWS")
+                    churn.Add((record.Lsn, record.SlotId.Value, shifts));
+            }
+
             switch (record.Operation)
             {
                 case "LOP_INSERT_ROWS":
-                    insertedKeys.Add(key);
+                    // The same key inserted again after changes were seen: a
+                    // page split moving the row, or a delete and a re-insert.
+                    if (chains.ContainsKey(key) && !known.Contains(key) && record.RowLogContents0 is { Length: > 0 })
+                        reinserted.TryAdd(key, record);
+                    known.Add(key);
                     break;
+
                 case "LOP_DELETE_ROWS" when record.RowLogContents0 is { Length: > 0 }:
-                    deletes.Add(record);
+                    if (!deletesByPage.TryGetValue(record.PageId, out var onPage))
+                        deletesByPage[record.PageId] = onPage = [];
+                    onPage.Add(record);
                     break;
 
                 // Heap forwarding. A row that is turned into a pointer is
                 // logged with its complete image up to that point, so that
                 // image is the anchor for everything logged on it before.
-                case "LOP_MODIFY_ROW" when !insertedKeys.Contains(key) &&
+                case "LOP_MODIFY_ROW" when !known.Contains(key) &&
                                            record.OffsetInRow == 0 &&
                                            record.RowLogContents0 is { } rowImage &&
                                            record.RowLogContents1 is { } pointer &&
@@ -77,7 +129,7 @@ public static class RowImageAnchoring
                         if (seed is not null)
                             seeds[key] = new RowImageSeed(seed, beforeForwarding[0].Lsn);
                     }
-                    insertedKeys.Add(key);
+                    known.Add(key);
                     break;
 
                 // The pointer is turned back into the row: its image is known
@@ -87,10 +139,10 @@ public static class RowImageAnchoring
                                            record.RowLogContents1 is { } rowBack &&
                                            RowFormat.IsForwardingStub(oldPointer) && RowFormat.IsPrimaryRecord(rowBack):
                     chains.Remove(key);
-                    insertedKeys.Add(key);
+                    known.Add(key);
                     break;
 
-                case "LOP_MODIFY_ROW" or "LOP_MODIFY_COLUMNS" when !insertedKeys.Contains(key):
+                case "LOP_MODIFY_ROW" or "LOP_MODIFY_COLUMNS" when !known.Contains(key):
                     if (!chains.TryGetValue(key, out var chain))
                         chains[key] = chain = [];
                     chain.Add(record);
@@ -98,8 +150,6 @@ public static class RowImageAnchoring
             }
         }
 
-        // A caller that only needs one transaction's rows (an undo) does not
-        // want a data page read for every old row anyone updated.
         if (onlyTransactionId is not null)
         {
             foreach (var key in chains.Where(c => !c.Value.Any(r => r.TransactionId == onlyTransactionId))
@@ -107,196 +157,143 @@ public static class RowImageAnchoring
                 chains.Remove(key);
         }
 
+        // Chains that already have a seed from the pointer-conversion image
+        // need nothing further.
+        foreach (var key in seeds.Keys.ToList())
+            chains.Remove(key);
+
         if (chains.Count == 0)
             return seeds;
 
-        var pageCache = new Dictionary<string, IReadOnlyList<PageRow>>();
-        var unanchored = new List<string>();
+        // Did anything between the two LSNs change what this slot of this page
+        // means? (Page splits are not visible; a row a split moved elsewhere
+        // simply is not found where it was, so they only cause a refusal.)
+        bool SlotMayHaveChanged(string pageId, int slot, bool clustered, string afterLsn, string beforeLsn)
+        {
+            if (!churnByPage.TryGetValue(pageId, out var changes))
+                return false;
+            foreach (var (lsn, changedSlot, shifts) in changes)
+            {
+                if (string.CompareOrdinal(lsn, afterLsn) <= 0) continue;
+                if (string.CompareOrdinal(lsn, beforeLsn) >= 0) break;
+                if (clustered ? changedSlot <= slot : changedSlot == slot) return true;
+            }
+            return false;
+        }
 
-        // 1. The row still exists on the page it was last logged on.
+        var pageCache = new Dictionary<string, IReadOnlyList<PageRow>?>();
+
+        async Task<IReadOnlyList<PageRow>?> PageAsync(string pageId)
+        {
+            if (!pageCache.TryGetValue(pageId, out var rows))
+                pageCache[pageId] = rows = await source.ReadPageAsync(pageId, ct);
+            return rows;
+        }
+
+        // Pass 1: where is each chain's row on its last-known page?
+        var onLastPage = new Dictionary<string, byte[]?>();
+        var unlocated = new List<string>();
         foreach (var (key, chain) in chains)
         {
             ct.ThrowIfCancellationRequested();
+            if (reinserted.ContainsKey(key)) continue; // the present row may be another incarnation
+
             var last = chain[^1];
-            var live = await FindOnPageAsync(connection, pageCache, last.PageId!, last, ct);
-            if (live is not null)
-            {
-                var seed = UndoChain(live, chain);
-                if (seed is not null)
-                    seeds[key] = new RowImageSeed(seed, chain[0].Lsn);
-            }
-            else
-            {
-                unanchored.Add(key);
-            }
+            string? hash = RowIdentity.KeyHash(last.RowLogContents3);
+            var rows = await PageAsync(last.PageId!);
+            byte[]? image = rows is null ? null : PickRow(rows, last, hash, SlotMayHaveChanged);
+            if (image is not null)
+                onLastPage[key] = image;
+            else if (hash is not null)
+                unlocated.Add(key);
         }
 
-        // 2. A page split (or similar) moved it: ask the table where the key
-        //    hash is now. One scan answers for all of them.
-        var stillMissing = new List<string>();
-        var keyHashes = unanchored
-            .Select(k => (Key: k, Hash: RowIdentity.KeyHash(chains[k][^1].RowLogContents3)))
-            .ToList();
-        var locations = await LocateByKeyHashAsync(
-            connection, tableName, keyHashes.Where(x => x.Hash is not null).Select(x => x.Hash!).Distinct().ToList(), ct);
+        // Pass 2: a page split moved them - ask the table where the hash is now.
+        var wanted = unlocated
+            .Select(k => RowIdentity.KeyHash(chains[k][^1].RowLogContents3)!)
+            .Distinct().ToList();
+        var locations = wanted.Count == 0
+            ? new Dictionary<string, string>()
+            : (await source.LocateByKeyHashAsync(wanted, ct)).ToDictionary(p => p.Key, p => p.Value);
 
-        foreach (var (key, hash) in keyHashes)
+        foreach (var key in unlocated)
         {
-            var chain = chains[key];
-            if (hash is not null && locations.TryGetValue(hash, out var pageId))
-            {
-                var live = await FindOnPageAsync(connection, pageCache, pageId, chain[^1], ct);
-                if (live is not null)
-                {
-                    var seed = UndoChain(live, chain);
-                    if (seed is not null)
-                        seeds[key] = new RowImageSeed(seed, chain[0].Lsn);
-                    continue;
-                }
-            }
-            stillMissing.Add(key);
+            var last = chains[key][^1];
+            string hash = RowIdentity.KeyHash(last.RowLogContents3)!;
+            if (!locations.TryGetValue(hash, out var pageId)) continue;
+            var rows = await PageAsync(pageId);
+            if (rows is null) continue;
+            var matches = rows.Where(r => r.RecordType is "PRIMARY_RECORD" or "FORWARDED_RECORD" && r.KeyHash == hash).ToList();
+            if (matches.Count == 1)
+                onLastPage[key] = matches[0].Bytes;
         }
 
-        // 3. Otherwise it was deleted: one DELETE image must verify. The
-        //    delete is looked for where the row was last seen first (same
-        //    page and slot, then same page, then anywhere later in the log),
-        //    and only an unambiguous match at the nearest level that has one
-        //    is used.
+        // Decide, per chain, from the sources that verify.
         var usedDeletes = new HashSet<string>();
-        foreach (var key in stillMissing)
+        foreach (var (key, chain) in chains)
         {
-            var chain = chains[key];
             var last = chain[^1];
-            var later = deletes
-                .Where(d => string.CompareOrdinal(d.Lsn, last.Lsn) > 0 && !usedDeletes.Contains(d.Lsn))
-                .ToList();
-            var tiers = new[]
-            {
-                later.Where(d => d.PageId == last.PageId && d.SlotId == last.SlotId).ToList(),
-                later.Where(d => d.PageId == last.PageId).ToList(),
-                later,
-            };
+            var candidates = new List<(string Source, byte[] Image, string? DeleteLsn)>();
 
-            foreach (var tier in tiers)
+            if (onLastPage.TryGetValue(key, out var live) && live is not null &&
+                UndoChain(live, chain) is { } fromLive)
+                candidates.Add(("live", fromLive, null));
+
+            if (reinserted.TryGetValue(key, out var again) && again.RowLogContents0 is { } insertedImage &&
+                UndoChain(insertedImage, chain) is { } fromReinsert)
+                candidates.Add(("reinsert", fromReinsert, null));
+
+            if (deletesByPage.TryGetValue(last.PageId!, out var deletes))
             {
-                var verified = new List<(string Lsn, byte[] Image)>();
-                foreach (var delete in tier)
+                foreach (var delete in deletes)
                 {
-                    var candidate = UndoChain(delete.RowLogContents0!, chain);
-                    if (candidate is not null)
-                        verified.Add((delete.Lsn, candidate));
+                    if (string.CompareOrdinal(delete.Lsn, last.Lsn) <= 0 || usedDeletes.Contains(delete.Lsn)) continue;
+                    if (delete.SlotId != last.SlotId) continue;
+                    if (SlotMayHaveChanged(last.PageId!, last.SlotId!.Value, last.Context != "LCX_HEAP", last.Lsn, delete.Lsn)) continue;
+                    if (reinserted.TryGetValue(key, out var ins) && string.CompareOrdinal(delete.Lsn, ins.Lsn) > 0) continue;
+                    if (UndoChain(delete.RowLogContents0!, chain) is { } fromDelete)
+                        candidates.Add(("delete", fromDelete, delete.Lsn));
                 }
-                if (verified.Count == 0)
-                    continue;
-                if (verified.Count == 1)
-                {
-                    seeds[key] = new RowImageSeed(verified[0].Image, chain[0].Lsn);
-                    usedDeletes.Add(verified[0].Lsn);
-                }
-                break;
             }
+
+            // Exactly one source. Two that verify mean the same bytes could
+            // belong to a deleted-and-reinserted row, or to another row: no seed.
+            if (candidates.Count != 1)
+                continue;
+
+            seeds[key] = new RowImageSeed(candidates[0].Image, chain[0].Lsn);
+            if (candidates[0].DeleteLsn is { } used)
+                usedDeletes.Add(used);
         }
 
         return seeds;
     }
 
-    private static async Task<byte[]?> FindOnPageAsync(
-        SqlConnection connection, Dictionary<string, IReadOnlyList<PageRow>> pageCache,
-        string pageId, LogRecord last, CancellationToken ct)
+    /// <summary>
+    /// The row to anchor on within a page: by key hash when the chain has one,
+    /// otherwise - heaps only - the exact slot, and only if nothing was
+    /// inserted at or deleted from that slot since the last logged change.
+    /// </summary>
+    private static byte[]? PickRow(
+        IReadOnlyList<PageRow> rows, LogRecord last, string? hash,
+        Func<string, int, bool, string, string, bool> slotMayHaveChanged)
     {
-        IReadOnlyList<PageRow> rows;
-        try
-        {
-            if (!pageCache.TryGetValue(pageId, out rows!))
-                pageCache[pageId] = rows = await DataPageReader.ReadRowsAsync(connection, pageId, ct);
-        }
-        catch (SqlException)
-        {
-            // Page not readable (permissions, deallocated page): no live row
-            // can be anchored from it.
-            return null;
-        }
+        var present = rows.Where(r => r.RecordType is "PRIMARY_RECORD" or "FORWARDED_RECORD").ToList();
 
-        var primary = rows.Where(r => r.RecordType is "PRIMARY_RECORD" or "FORWARDED_RECORD").ToList();
-        string? hash = RowIdentity.KeyHash(last.RowLogContents3);
         if (hash is not null)
         {
-            var byHash = primary.Where(r => r.KeyHash == hash).ToList();
+            var byHash = present.Where(r => r.KeyHash == hash).ToList();
             return byHash.Count == 1 ? byHash[0].Bytes : null; // 0 = not here, >1 = hash collision
         }
 
-        // Heap: row ids do not move, so the logged slot is the row - but only
-        // on the page it was logged on.
-        return pageId == last.PageId ? primary.FirstOrDefault(r => r.SlotId == last.SlotId)?.Bytes : null;
-    }
+        if (last.Context != "LCX_HEAP")
+            return null; // a clustered row with no hash has no identity on the page
 
-    /// <summary>
-    /// Key hash (upper-case hex) to the page currently holding that row, for
-    /// the hashes that identify exactly one row.
-    /// </summary>
-    private static async Task<IReadOnlyDictionary<string, string>> LocateByKeyHashAsync(
-        SqlConnection connection, string tableName, IReadOnlyList<string> hashes, CancellationToken ct)
-    {
-        var found = new Dictionary<string, string>();
-        var ambiguous = new HashSet<string>();
-        if (hashes.Count == 0)
-            return found;
-
-        string? qualified;
-        await using (var resolve = new SqlCommand(
-            "SELECT QUOTENAME(OBJECT_SCHEMA_NAME(OBJECT_ID(@t))) + N'.' + QUOTENAME(OBJECT_NAME(OBJECT_ID(@t)))", connection))
-        {
-            resolve.Parameters.AddWithValue("@t", tableName);
-            qualified = await resolve.ExecuteScalarAsync(ct) as string;
-        }
-        if (qualified is null)
-            return found;
-
-        for (int start = 0; start < hashes.Count; start += HashLookupBatchSize)
-        {
-            var batch = hashes.Skip(start).Take(HashLookupBatchSize)
-                .Where(h => h.Length == 12 && h.All(Uri.IsHexDigit))
-                .ToList();
-            if (batch.Count == 0)
-                continue;
-
-            // The values are validated hex, so they can be written as literals.
-            string list = string.Join(",", batch.Select(h => $"N'({h.ToLowerInvariant()})'"));
-            string sql =
-                $"SELECT CONVERT(nvarchar(40), %%lockres%%), sys.fn_PhysLocFormatter(%%physloc%%) FROM {qualified} WITH (NOLOCK) " +
-                $"WHERE %%lockres%% IN ({list})";
-
-            await using var command = new SqlCommand(sql, connection) { CommandTimeout = 300 };
-            await using var reader = await command.ExecuteReaderAsync(ct);
-            while (await reader.ReadAsync(ct))
-            {
-                string hash = reader.GetString(0).Trim('(', ')').ToUpperInvariant();
-                string? page = ToPageId(reader.GetString(1));
-                if (page is null)
-                    continue;
-                if (found.ContainsKey(hash) || ambiguous.Contains(hash))
-                {
-                    found.Remove(hash);
-                    ambiguous.Add(hash); // two rows share it: do not guess
-                }
-                else
-                {
-                    found[hash] = page;
-                }
-            }
-        }
-        return found;
-    }
-
-    /// <summary>"(file:page:slot)" to fn_dblog's "FFFF:PPPPPPPP" (hex).</summary>
-    private static string? ToPageId(string physLoc)
-    {
-        var parts = physLoc.Trim('(', ')').Split(':');
-        if (parts.Length != 3 ||
-            !int.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out int file) ||
-            !int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out int page))
+        // The upper bound is "now": everything after the change counts.
+        if (slotMayHaveChanged(last.PageId!, last.SlotId!.Value, false, last.Lsn, "\uffff"))
             return null;
-        return $"{file:X4}:{page:X8}";
+
+        return present.FirstOrDefault(r => r.SlotId == last.SlotId)?.Bytes;
     }
 
     /// <summary>
@@ -340,5 +337,99 @@ public static class RowImageAnchoring
             return null;
 
         return ModifyColumnsPatcher.TryApplyBackward(after, r0, r1, r4, out var before, out _) ? before : null;
+    }
+}
+
+/// <summary>Reads data pages and row locations from a live SQL Server.</summary>
+public sealed class SqlAnchorSource(SqlConnection connection, string tableName) : IAnchorSource
+{
+    private const int BatchSize = 500;
+
+    public async Task<IReadOnlyList<PageRow>?> ReadPageAsync(string pageId, CancellationToken ct)
+    {
+        try
+        {
+            return await DataPageReader.ReadRowsAsync(connection, pageId, ct);
+        }
+        catch (Exception ex) when (ex is SqlException or InvalidCastException or InvalidOperationException or FormatException)
+        {
+            // Not readable (permissions, deallocated page, unexpected output):
+            // nothing can be anchored from it.
+            return null;
+        }
+    }
+
+    public async Task<IReadOnlyDictionary<string, string>> LocateByKeyHashAsync(IReadOnlyList<string> hashes, CancellationToken ct)
+    {
+        var found = new Dictionary<string, string>();
+        var ambiguous = new HashSet<string>();
+        if (hashes.Count == 0)
+            return found;
+
+        try
+        {
+            string? qualified;
+            await using (var resolve = new SqlCommand(
+                "SELECT QUOTENAME(OBJECT_SCHEMA_NAME(OBJECT_ID(@t))) + N'.' + QUOTENAME(OBJECT_NAME(OBJECT_ID(@t)))", connection))
+            {
+                resolve.Parameters.AddWithValue("@t", tableName);
+                qualified = await resolve.ExecuteScalarAsync(ct) as string;
+            }
+            if (qualified is null)
+                return found;
+
+            for (int start = 0; start < hashes.Count; start += BatchSize)
+            {
+                var batch = hashes.Skip(start).Take(BatchSize)
+                    .Where(h => h.Length == 12 && h.All(Uri.IsHexDigit))
+                    .ToList();
+                if (batch.Count == 0)
+                    continue;
+
+                // The values are validated hex, so they can be written as
+                // literals. INDEX(0) is the heap or clustered index itself, so
+                // %%physloc%% is the row's real location, not an index entry's.
+                string list = string.Join(",", batch.Select(h => $"N'({h.ToLowerInvariant()})'"));
+                string sql =
+                    $"SELECT CONVERT(nvarchar(40), %%lockres%%), sys.fn_PhysLocFormatter(%%physloc%%) FROM {qualified} WITH (NOLOCK, INDEX(0)) " +
+                    $"WHERE %%lockres%% IN ({list})";
+
+                await using var command = new SqlCommand(sql, connection) { CommandTimeout = 300 };
+                await using var reader = await command.ExecuteReaderAsync(ct);
+                while (await reader.ReadAsync(ct))
+                {
+                    string hash = reader.GetString(0).Trim('(', ')').ToUpperInvariant();
+                    string? page = ToPageId(reader.GetString(1));
+                    if (page is null)
+                        continue;
+                    if (found.ContainsKey(hash) || ambiguous.Contains(hash))
+                    {
+                        found.Remove(hash);
+                        ambiguous.Add(hash); // two rows share it: do not guess
+                    }
+                    else
+                    {
+                        found[hash] = page;
+                    }
+                }
+            }
+        }
+        catch (Exception ex) when (ex is SqlException or InvalidCastException or InvalidOperationException)
+        {
+            return new Dictionary<string, string>();
+        }
+
+        return found;
+    }
+
+    /// <summary>"(file:page:slot)" to fn_dblog's "FFFF:PPPPPPPP" (hex).</summary>
+    private static string? ToPageId(string physLoc)
+    {
+        var parts = physLoc.Trim('(', ')').Split(':');
+        if (parts.Length != 3 ||
+            !int.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out int file) ||
+            !int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out int page))
+            return null;
+        return $"{file:X4}:{page:X8}";
     }
 }

@@ -11,7 +11,8 @@ public sealed record RowEvent(
     DateTime? Timestamp,
     string PageId,
     int SlotId,
-    string? TransactionId = null)
+    string? TransactionId = null,
+    bool BeforeRebuiltFromCurrentRow = false)
 {
     /// <summary>
     /// True whenever this event's data should not be trusted as-is without
@@ -25,6 +26,11 @@ public sealed record RowEvent(
     /// drift out of sync with it.
     /// </summary>
     public bool NeedsManualReview => Note is not null;
+
+    // BeforeRebuiltFromCurrentRow: the before-image was not in the log; it was
+    // derived from the row's image after its last change (data page or a later
+    // DELETE) by undoing every logged change, each step verified. Nothing is
+    // wrong with it - the flag lets a caller that wants a stricter rule choose.
 }
 
 /// <summary>
@@ -99,8 +105,22 @@ public static class RowHistoryReconstructor
         var seeded = new HashSet<string>();
         var rowKeys = new RowKeyIndex();
 
+        // Rolled-back work. SQL Server undoes a statement or transaction by
+        // writing compensation records, in reverse order of the records they
+        // undo. They keep the row images right, so they are applied to the
+        // state like any change, but they are not changes anyone made: they
+        // report no event of their own and cancel the event of the record
+        // they undo (the latest still-standing one of the same transaction).
+        // Per transaction: the index of the event each processed record
+        // produced, or -1 when it produced none.
+        var undoStack = new Dictionary<string, Stack<int>>();
+        var cancelled = new HashSet<int>();
+
         void Remember(string key, string pageId, RowState row)
         {
+            if (state.TryGetValue(key, out var previous) && previous.PageId != pageId &&
+                rowsByPage.TryGetValue(previous.PageId, out var previousPage))
+                previousPage.Remove(key);
             state[key] = row;
             if (!rowsByPage.TryGetValue(pageId, out var keys))
                 rowsByPage[pageId] = keys = [];
@@ -129,8 +149,9 @@ public static class RowHistoryReconstructor
             var combinedCorruptedColumns = beforeCorruptedColumns.Concat(afterCorruptedColumns).Distinct().ToList();
             string? columnCorruptionNote = combinedCorruptedColumns.Count > 0 ? BuildColumnCorruptionNote(combinedCorruptedColumns) : null;
             string? note = WithNote(WithNote(beforeNote ?? afterNote, columnCorruptionNote), possiblyCorrupted ? UpdateCorruptionNote : null);
-            events.Add(new RowEvent(record.Lsn, RowEventKind.Update, beforeDecoded, afterDecoded, note, TimestampOf(record), record.PageId!, record.SlotId!.Value, record.TransactionId));
-            Remember(key, record.PageId!, new RowState(afterBytes, record.Lsn, possiblyCorrupted, record.PageId!));
+            events.Add(new RowEvent(record.Lsn, RowEventKind.Update, beforeDecoded, afterDecoded, note, TimestampOf(record), record.PageId!, record.SlotId!.Value, record.TransactionId,
+                BeforeRebuiltFromCurrentRow: before.Anchored));
+            Remember(key, record.PageId!, new RowState(afterBytes, record.Lsn, possiblyCorrupted, record.PageId!, before.Anchored));
         }
 
         void EmitRefused(LogRecord record, string? note) =>
@@ -140,11 +161,12 @@ public static class RowHistoryReconstructor
         foreach (var record in recordsInLsnOrder)
         {
             if (record.PageId is null || record.SlotId is null) continue;
+            int eventsBefore = events.Count;
             string key = rowKeys.Resolve(record);
             if (record.Operation is "LOP_INSERT_ROWS" or "LOP_MODIFY_ROW" or "LOP_MODIFY_COLUMNS")
                 rowKeys.Observe(record, key);
             else if (record.Operation == "LOP_DELETE_ROWS")
-                rowKeys.ForgetSlot(record);
+                rowKeys.ObserveDelete(record);
             bool recordTouchedABoundary = HasAny(record.PossiblyCorruptedOffsetsInRowLogContents0) || HasAny(record.PossiblyCorruptedOffsetsInRowLogContents1);
 
             // A row first seen through an UPDATE starts from its anchored
@@ -153,7 +175,7 @@ public static class RowHistoryReconstructor
                 !state.ContainsKey(key) && seeded.Add(key) &&
                 seedImages is not null && seedImages.TryGetValue(key, out var seed))
             {
-                Remember(key, record.PageId, new RowState(seed.Bytes, seed.AsOfLsn, false, record.PageId));
+                Remember(key, record.PageId, new RowState(seed.Bytes, seed.AsOfLsn, false, record.PageId, Anchored: true));
             }
 
             switch (record.Operation)
@@ -177,7 +199,9 @@ public static class RowHistoryReconstructor
                         // this is the row moving, not a new row. (Reporting it
                         // as an INSERT also made an undo of that transaction
                         // delete the row.)
-                        if (state.TryGetValue(key, out var alreadyKnown) && alreadyKnown.Bytes.AsSpan().SequenceEqual(bytes))
+                        if (state.TryGetValue(key, out var alreadyKnown) &&
+                            alreadyKnown.PageId != record.PageId &&
+                            alreadyKnown.Bytes.AsSpan().SequenceEqual(bytes))
                         {
                             Remember(key, record.PageId, alreadyKnown with { PageId = record.PageId });
                             break;
@@ -205,8 +229,8 @@ public static class RowHistoryReconstructor
                         // A forwarded record is also removed when the row moves
                         // back to its original place. That is not a delete if the
                         // original place has already been given its row back.
-                        if (RowFormat.IsForwardedRecord(bytes) &&
-                            RowFormat.ForwardedFromKey(bytes) is { } origin &&
+                        if (RowFormat.TryGetForwardedFrom(bytes, out var originPage, out var originSlot) &&
+                            rowKeys.KeyAt(originPage, originSlot) is { } origin &&
                             state.TryGetValue(origin, out var originState) &&
                             !RowFormat.IsForwardingStub(originState.Bytes))
                         {
@@ -347,15 +371,38 @@ public static class RowHistoryReconstructor
                         break;
                     }
             }
+
+            if (record.TransactionId is not null &&
+                record.Operation is "LOP_INSERT_ROWS" or "LOP_MODIFY_ROW" or "LOP_MODIFY_COLUMNS" or "LOP_DELETE_ROWS")
+            {
+                if (!undoStack.TryGetValue(record.TransactionId, out var stack))
+                    undoStack[record.TransactionId] = stack = new Stack<int>();
+
+                if (record.IsCompensation)
+                {
+                    // Whatever this record produced is not reported, and the
+                    // record it undoes is no longer a change.
+                    if (events.Count > eventsBefore)
+                        events.RemoveRange(eventsBefore, events.Count - eventsBefore);
+                    if (stack.Count > 0 && stack.Pop() is var undone and >= 0)
+                        cancelled.Add(undone);
+                }
+                else
+                {
+                    stack.Push(events.Count > eventsBefore ? eventsBefore : -1);
+                }
+            }
         }
 
-        return events;
+        return cancelled.Count == 0
+            ? events
+            : events.Where((_, index) => !cancelled.Contains(index)).ToList();
     }
 
     internal const string BeforeImageUnknownNote =
         "before image unknown - this row's insert (or a prior update) is outside the observed log window";
 
-    private sealed record RowState(byte[] Bytes, string WrittenAtLsn, bool PossiblyCorrupted, string PageId);
+    private sealed record RowState(byte[] Bytes, string WrittenAtLsn, bool PossiblyCorrupted, string PageId, bool Anchored = false);
 
     private static IReadOnlyDictionary<string, object?>? TryDecode(
         byte[] bytes, IReadOnlyList<ColumnSchema> schema, string lsn, IReadOnlyList<string> ddlBoundaryLsns,

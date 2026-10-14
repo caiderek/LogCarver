@@ -22,18 +22,20 @@ public static class RowFormat
     public static bool IsForwardedRecord(ReadOnlySpan<byte> row) => row.Length > 14 && RecordType(row) == 1;
 
     /// <summary>
-    /// The <see cref="RowIdentity"/> (page/slot form) of the place a
-    /// forwarded record was moved from.
+    /// The place (fn_dblog page id and slot) a forwarded record was moved from.
     /// </summary>
-    public static string? ForwardedFromKey(ReadOnlySpan<byte> forwardedRecord)
+    public static bool TryGetForwardedFrom(ReadOnlySpan<byte> forwardedRecord, out string pageId, out int slot)
     {
+        pageId = "";
+        slot = 0;
         if (!IsForwardedRecord(forwardedRecord))
-            return null;
+            return false;
 
         var tail = forwardedRecord[^8..];
         uint page = BitConverter.ToUInt32(tail[..4]);
         ushort file = BitConverter.ToUInt16(tail.Slice(4, 2));
-        ushort slot = BitConverter.ToUInt16(tail.Slice(6, 2));
-        return $"P:{file:x4}:{page:x8}:{slot}";
+        slot = BitConverter.ToUInt16(tail.Slice(6, 2));
+        pageId = $"{file:x4}:{page:x8}";
+        return true;
     }
 }

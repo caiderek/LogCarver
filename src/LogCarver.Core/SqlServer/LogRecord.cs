@@ -27,6 +27,12 @@ namespace LogCarver.Core.SqlServer;
 /// list here currently only contributes to a coarser, whole-update note
 /// via RowHistoryReconstructor, not a per-column one.
 /// </param>
+/// <param name="IsCompensation">
+/// True for a compensation log record: the physical undo SQL Server writes
+/// when a statement or transaction is rolled back (fn_dblog's Description is
+/// COMPENSATION). It keeps the row images consistent but is not a change
+/// anyone made, and it cancels the record it undoes.
+/// </param>
 /// <param name="RowLogContents2">
 /// For LOP_INSERT_ROWS, the lock information of the inserted row (for a
 /// clustered-index row 26 bytes whose last 6 are the key hash). Other
@@ -61,4 +67,5 @@ public sealed record LogRecord(
     IReadOnlyList<int>? PossiblyCorruptedOffsetsInRowLogContents1 = null,
     byte[]? RowLogContents4 = null,
     byte[]? RowLogContents3 = null,
-    byte[]? RowLogContents2 = null);
+    byte[]? RowLogContents2 = null,
+    bool IsCompensation = false);
