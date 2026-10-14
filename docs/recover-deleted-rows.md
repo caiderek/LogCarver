@@ -59,7 +59,7 @@ Add `--undo` to print suggested SQL that reverses each change. The tool only pri
 - **TRUNCATE TABLE and DROP TABLE can't be recovered.** Both release whole pages, and the log has no row by row delete records for them. This is true for any tool.
 - **Once the log has been reused, the free version can't see the rows.** The paid version, [LogCarverOffline](faq.md#whats-the-difference-between-the-free-logcarver-and-the-paid-logcarveroffline), reads the bytes in the `.ldf` file directly. If those bytes haven't been overwritten yet, it may recover data that `fn_dblog` no longer reports.
 - **Compressed tables and off-row LOB columns are refused.** The tool will not decode them. This is a known limit.
-- **A few UPDATE log formats aren't decoded yet and are flagged for manual review.** They only show up in unusual cases and most results are fine, but check the output anyway.
+- **An UPDATE of a row whose INSERT has already left the log is rebuilt from the row's current state, and is flagged for manual review if that isn't possible.** The tool reads the row from the data page (or from its later DELETE record) and undoes the logged changes, checking every step against the log. It refuses rather than guesses when the row can't be found or doesn't match. This was verified on SQL Server 2025; check the output before relying on it on other versions.
 - **It runs on Windows only, and the login needs sysadmin or db_owner.**
 
 The full list of limits and supported column types is in the [README](https://github.com/caiderek/LogCarver) and the [FAQ](faq.md).

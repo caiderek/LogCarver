@@ -33,7 +33,7 @@ description: "SQL Server 沒有備份,誤刪的資料還能救回來嗎?fn_dblog
 
 ## UPDATE 之前的原始值查得到嗎,不只是改之後的值？
 
-可以。SQL Server 的 UPDATE log 紀錄只存改動的那一小段位元組(差異片段,不是整列重存),所以 LogCarver 會從這一列當初的 INSERT 開始,依序套用每一次 UPDATE,重建出完整歷程——同時給你改之前跟改之後的值。用 `--key <Column>=<Value>` 可以看單一列的完整歷史,用 `--snapshot <datetime>` 可以看某個時間點所有列的樣子。
+可以。SQL Server 的 UPDATE log 紀錄只存改動的那一小段位元組(差異片段,不是整列重存),所以 LogCarver 會從這一列當初的 INSERT 開始,依序套用每一次 UPDATE,重建出完整歷程——同時給你改之前跟改之後的值。如果這一列的 INSERT 已經不在記錄檔裡,LogCarver 會從這一列「最後一次異動之後」的狀態(從資料頁,或之後的 DELETE 記錄取得)倒著還原記錄檔裡的變更,每一步都和記錄比對;做不到就標示為需要人工檢查,不會硬猜。這部分在 SQL Server 2025 上驗證過。用 `--key <Column>=<Value>` 可以看單一列的完整歷史,用 `--snapshot <datetime>` 可以看某個時間點所有列的樣子。
 
 ## 這個工具需要什麼權限？會不會動到我的資料庫？
 

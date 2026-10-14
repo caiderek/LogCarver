@@ -59,7 +59,7 @@ LogCarver.exe localhost YourDatabase dbo.YourTable
 - **TRUNCATE TABLE 和 DROP TABLE 救不回來。** 這兩個動作是整頁檔案釋放,記錄檔裡不會有逐筆的刪除紀錄,不管用什麼工具都一樣。
 - **記錄檔被回收之後,免費版看不到。** 付費版 [LogCarverOffline](faq.zh-TW.md#免費版-logcarver-跟付費版-logcarveroffline-差在哪) 直接讀 `.ldf` 檔案的位元組,只要那段位元組還沒被實際覆寫,有機會救回 `fn_dblog` 已經不回報的資料。
 - **壓縮的資料表、存在列外面的 LOB 欄位會直接拒絕不做動作**,這個是已知的問題。
-- **少數 UPDATE 的記錄格式目前沒有解,會標示為需要人工檢查。** 太特別格式才會出現這些問題，大部分的狀況都是正常的，不過還是檢查一次比較好。
+- **INSERT 已經不在記錄檔裡的資料列,UPDATE 會從該列目前的狀態倒推回去;做不到的會標示為需要人工檢查。** 工具會從資料頁(或之後的 DELETE 記錄)取得該列,再逐一還原記錄檔裡的變更,每一步都和記錄比對。找不到該列、或對不上時寧可拒絕也不猜。這部分在 SQL Server 2025 上驗證過,其他版本請先檢查輸出再採用。
 - **只能在 Windows 上跑,連線帳號要有 sysadmin 或 db_owner 的權限。**
 
 完整的限制和支援的欄位型別在 [README](https://github.com/caiderek/LogCarver) 和 [常見問題](faq.zh-TW.md)。

@@ -33,7 +33,7 @@ Separately, the current free version has an unrelated over-refusal bug worth kno
 
 ## Can I see what a row's value was *before* an UPDATE, not just after?
 
-Yes. SQL Server's UPDATE log record only stores the changed byte range (a diff, not a full row), so LogCarver reconstructs each row's full history from its original INSERT forward, applying every UPDATE in order — giving you both the before and after image of any change. Run with `--key <Column>=<Value>` to see one row's full history, or `--snapshot <datetime>` to see every row as of a specific moment.
+Yes. SQL Server's UPDATE log record only stores the changed byte range (a diff, not a full row), so LogCarver reconstructs each row's full history from its original INSERT forward, applying every UPDATE in order — giving you both the before and after image of any change. If the row's INSERT has already left the log, LogCarver starts from the row's state after its last logged change (read from the data page, or from its later DELETE record) and undoes the logged changes, checking every step against the log; if that isn't possible it flags the UPDATE for manual review instead of guessing. This was verified on SQL Server 2025. Run with `--key <Column>=<Value>` to see one row's full history, or `--snapshot <datetime>` to see every row as of a specific moment.
 
 ## What permissions does this tool need? Does it touch my database?
 
