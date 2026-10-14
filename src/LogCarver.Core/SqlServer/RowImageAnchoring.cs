@@ -41,10 +41,19 @@ public static class RowImageAnchoring
         var insertedKeys = new HashSet<string>();
         var deletes = new List<LogRecord>();
 
+        // The same row-tracking rules the reconstructor uses, so a chain here
+        // is exactly the set of records the reconstructor will see without an
+        // earlier image.
+        var rowKeys = new RowKeyIndex();
+
         foreach (var record in recordsInLsnOrder)
         {
             if (record.PageId is null || record.SlotId is null) continue;
-            string key = RowIdentity.Of(record);
+            string key = rowKeys.Resolve(record);
+            if (record.Operation is "LOP_INSERT_ROWS" or "LOP_MODIFY_ROW" or "LOP_MODIFY_COLUMNS")
+                rowKeys.Observe(record, key);
+            else if (record.Operation == "LOP_DELETE_ROWS")
+                rowKeys.ForgetSlot(record);
             switch (record.Operation)
             {
                 case "LOP_INSERT_ROWS":

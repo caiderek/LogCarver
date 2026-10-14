@@ -97,6 +97,7 @@ public static class RowHistoryReconstructor
         var state = new Dictionary<string, RowState>();
         var rowsByPage = new Dictionary<string, HashSet<string>>();
         var seeded = new HashSet<string>();
+        var rowKeys = new RowKeyIndex();
 
         void Remember(string key, string pageId, RowState row)
         {
@@ -139,7 +140,11 @@ public static class RowHistoryReconstructor
         foreach (var record in recordsInLsnOrder)
         {
             if (record.PageId is null || record.SlotId is null) continue;
-            string key = RowIdentity.Of(record);
+            string key = rowKeys.Resolve(record);
+            if (record.Operation is "LOP_INSERT_ROWS" or "LOP_MODIFY_ROW" or "LOP_MODIFY_COLUMNS")
+                rowKeys.Observe(record, key);
+            else if (record.Operation == "LOP_DELETE_ROWS")
+                rowKeys.ForgetSlot(record);
             bool recordTouchedABoundary = HasAny(record.PossiblyCorruptedOffsetsInRowLogContents0) || HasAny(record.PossiblyCorruptedOffsetsInRowLogContents1);
 
             // A row first seen through an UPDATE starts from its anchored
@@ -163,6 +168,18 @@ public static class RowHistoryReconstructor
                         if (RowFormat.IsForwardedRecord(bytes))
                         {
                             Remember(key, record.PageId, new RowState(bytes, record.Lsn, recordTouchedABoundary, record.PageId));
+                            break;
+                        }
+
+                        // A page split caused by an UPDATE re-inserts the moved
+                        // row on the new page, byte for byte. The row is
+                        // already known, and a key cannot be inserted twice, so
+                        // this is the row moving, not a new row. (Reporting it
+                        // as an INSERT also made an undo of that transaction
+                        // delete the row.)
+                        if (state.TryGetValue(key, out var alreadyKnown) && alreadyKnown.Bytes.AsSpan().SequenceEqual(bytes))
+                        {
+                            Remember(key, record.PageId, alreadyKnown with { PageId = record.PageId });
                             break;
                         }
 

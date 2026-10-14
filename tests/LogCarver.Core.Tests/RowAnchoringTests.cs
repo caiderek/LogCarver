@@ -125,6 +125,67 @@ public class RowAnchoringTests
     }
 
     [Fact]
+    public void Reconstruct_LinksAnUpdateWithAKeyHashToAnInsertThatCarriedNone()
+    {
+        // After a large statement escalates to a table lock the rows inserted
+        // later carry no lock information, but their UPDATEs still do. The
+        // UPDATE must still find the row it belongs to (found at 15,000-row
+        // INSERT...SELECT workloads: 39% of the updates lost their row).
+        var insert = new LogRecord("00000001", "LOP_INSERT_ROWS", "LCX_CLUSTERED", null, "dbo.T.PK", "0001:F8", 1, null,
+            H(Before), null);
+        var update = ModifyColumns("00000002", "0001:F8", 1);
+
+        var history = RowHistoryReconstructor.Reconstruct([insert, update], Schema, ddlBoundaryLsns: []);
+
+        Assert.Equal(2, history.Count);
+        Assert.False(history[1].NeedsManualReview);
+        Assert.Equal(11, history[1].After!["A"]);
+    }
+
+    [Fact]
+    public void Reconstruct_KeepsFollowingARowByItsHashAfterItsSlotMoved()
+    {
+        var insert = new LogRecord("00000001", "LOP_INSERT_ROWS", "LCX_CLUSTERED", null, "dbo.T.PK", "0001:F8", 1, null,
+            H(Before), null);
+        var first = ModifyColumns("00000002", "0001:F8", 1);   // links the hash to the row
+        // The row's slot moved (another row was inserted ahead of it); the old
+        // slot is now another row's. A second UPDATE carrying the same hash
+        // must be applied to this row, not refused or applied to that one.
+        var after = H(After);
+        var secondRlc0 = H("0800080008000800");
+        var second = new LogRecord("00000003", "LOP_MODIFY_ROW", "LCX_CLUSTERED", 8, "dbo.T.PK", "0001:F8", 2, null,
+            H("0B000000"), H("0C000000"), RowLogContents3: H(Rlc3));
+
+        var history = RowHistoryReconstructor.Reconstruct([insert, first, second], Schema, ddlBoundaryLsns: []);
+
+        Assert.Equal(3, history.Count);
+        Assert.False(history[2].NeedsManualReview);
+        Assert.Equal(11, history[2].Before!["A"]);
+        Assert.Equal(12, history[2].After!["A"]);
+        Assert.NotNull(after);
+        Assert.NotNull(secondRlc0);
+    }
+
+    [Fact]
+    public void Reconstruct_ReInsertOfAKnownRowByteForByte_IsAMoveNotAnInsert()
+    {
+        // A page split caused by an UPDATE re-inserts the moved row on the
+        // new page (found on a table with large columns: the row showed up
+        // as a second INSERT right before its UPDATE).
+        var insert = new LogRecord("00000001", "LOP_INSERT_ROWS", "LCX_CLUSTERED", null, "dbo.T.PK", "0001:F8", 1, null,
+            H(Before), null, RowLogContents2: H(Rlc3));
+        var moved = new LogRecord("00000002", "LOP_INSERT_ROWS", "LCX_CLUSTERED", null, "dbo.T.PK", "0001:F9", 0, null,
+            H(Before), null, RowLogContents2: H(Rlc3));
+        var update = ModifyColumns("00000003", "0001:F9", 0);
+
+        var history = RowHistoryReconstructor.Reconstruct([insert, moved, update], Schema, ddlBoundaryLsns: []);
+
+        Assert.Equal([RowEventKind.Insert, RowEventKind.Update], history.Select(e => e.Kind).ToArray());
+        Assert.False(history[1].NeedsManualReview);
+        Assert.Equal(11, history[1].After!["A"]);
+    }
+
+    [Fact]
     public void Reconstruct_ModifyRowWithOldBytesThatDoNotMatchIsRefused()
     {
         // The slot's known image has A = 10 but the record claims to replace

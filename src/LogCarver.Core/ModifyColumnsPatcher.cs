@@ -318,7 +318,8 @@ public static class ModifyColumnsPatcher
             {
                 if (arrayEnd > row.Length)
                     return false;
-                expected = ReadU16(row, arrayEnd - 2);
+                // Bit 0x8000 flags a complex (off-row) column; it is not part of the offset.
+                expected = ReadU16(row, arrayEnd - 2) & 0x7FFF;
             }
         }
         else
