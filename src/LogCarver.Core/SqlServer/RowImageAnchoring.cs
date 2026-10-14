@@ -177,6 +177,22 @@ public static class RowImageAnchoring
             }
         }
 
+        // How many chains (of ANY transaction) a DELETE image verifies for. The
+        // count is taken before chains are narrowed to the requested
+        // transaction: the ambiguity is real even if the other chain is not
+        // one anyone asked about.
+        var chainsPerDelete = new Dictionary<string, int>();
+        foreach (var (key, chain) in chains)
+        {
+            var last = chain[^1];
+            if (!deletesByPage.TryGetValue(last.PageId!, out var pageDeletes)) continue;
+            foreach (var delete in pageDeletes)
+            {
+                if (DeleteImageFor(key, chain, delete) is not null)
+                    chainsPerDelete[delete.Lsn] = chainsPerDelete.GetValueOrDefault(delete.Lsn) + 1;
+            }
+        }
+
         if (onlyTransactionId is not null)
         {
             foreach (var key in chains.Where(c => !c.Value.Any(r => r.TransactionId == onlyTransactionId))
@@ -206,6 +222,19 @@ public static class RowImageAnchoring
                 if (clustered ? changedSlot <= slot : changedSlot == slot) return true;
             }
             return false;
+        }
+
+        // The image of a later DELETE that could be this chain's row's last
+        // image: same page and slot, nothing moved the slot in between, not
+        // after a re-insert, and the chain verifies from it.
+        byte[]? DeleteImageFor(string key, List<LogRecord> chain, LogRecord delete)
+        {
+            var last = chain[^1];
+            if (string.CompareOrdinal(delete.Lsn, last.Lsn) <= 0) return null;
+            if (delete.SlotId != last.SlotId) return null;
+            if (SlotMayHaveChanged(last.PageId!, last.SlotId!.Value, last.Context != "LCX_HEAP", last.Lsn, delete.Lsn)) return null;
+            if (reinserted.TryGetValue(key, out var ins) && string.CompareOrdinal(delete.Lsn, ins.Lsn) > 0) return null;
+            return UndoChain(delete.RowLogContents0!, chain);
         }
 
         var pageCache = new Dictionary<string, IReadOnlyList<PageRow>?>();
@@ -274,11 +303,7 @@ public static class RowImageAnchoring
             {
                 foreach (var delete in deletes)
                 {
-                    if (string.CompareOrdinal(delete.Lsn, last.Lsn) <= 0) continue;
-                    if (delete.SlotId != last.SlotId) continue;
-                    if (SlotMayHaveChanged(last.PageId!, last.SlotId!.Value, last.Context != "LCX_HEAP", last.Lsn, delete.Lsn)) continue;
-                    if (reinserted.TryGetValue(key, out var ins) && string.CompareOrdinal(delete.Lsn, ins.Lsn) > 0) continue;
-                    if (UndoChain(delete.RowLogContents0!, chain) is { } fromDelete)
+                    if (DeleteImageFor(key, chain, delete) is { } fromDelete)
                         candidates.Add(("delete", fromDelete, delete.Lsn));
                 }
             }
@@ -287,13 +312,8 @@ public static class RowImageAnchoring
         }
 
         // One DELETE image can only be one row's last image. If it verifies
-        // for several chains, which of them it belongs to is not known, and
-        // handing it to whichever came first would make the result depend on
-        // the order: none of them takes it as a source.
-        var chainsPerDelete = candidatesByKey.Values
-            .SelectMany(c => c.Where(x => x.DeleteLsn is not null).Select(x => x.DeleteLsn!))
-            .GroupBy(l => l).ToDictionary(g => g.Key, g => g.Count());
-
+        // for several chains (counted above), which of them it belongs to is
+        // not known: none of them takes it as a source.
         foreach (var (key, candidates) in candidatesByKey)
         {
             // Exactly one source. Two that verify mean the same bytes could

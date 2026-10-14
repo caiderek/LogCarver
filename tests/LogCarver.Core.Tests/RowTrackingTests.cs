@@ -305,6 +305,22 @@ public class RowTrackingTests
     }
 
     [Fact]
+    public async Task Anchor_SharedDeleteImage_IsStillAmbiguousWhenOnlyOneTransactionIsAsked()
+    {
+        // Guard anchors one transaction's rows; another transaction's chain
+        // that the same DELETE image verifies for still makes it ambiguous.
+        var source = new FakeSource(new());
+        var records = new List<LogRecord>
+        {
+            ModifyColumns("00000002", "0001:F8", 1),
+            ModifyColumns("00000003", "0001:F8", 1, lockInfoHex: OtherHashLockInfo, tx: "T2"),
+            Delete("00000004", "0001:F8", 1, After, tx: "T3"),
+        };
+
+        Assert.Empty(await SeedsAsync(source, records, onlyTransaction: "T1"));
+    }
+
+    [Fact]
     public async Task Anchor_OnlyTheRequestedTransactionsRowsAreAnchored()
     {
         var source = new FakeSource(new() { ["0001:F8"] = [Row(1, After, "61A06ABD401C")] });
