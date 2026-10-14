@@ -31,7 +31,7 @@ public static class RowImageAnchoring
 
     public static async Task<IReadOnlyDictionary<string, RowImageSeed>> BuildSeedsAsync(
         SqlConnection connection, string tableName, IReadOnlyList<LogRecord> recordsInLsnOrder,
-        CancellationToken ct = default)
+        CancellationToken ct = default, string? onlyTransactionId = null)
     {
         var seeds = new Dictionary<string, RowImageSeed>();
 
@@ -96,6 +96,15 @@ public static class RowImageAnchoring
                     chain.Add(record);
                     break;
             }
+        }
+
+        // A caller that only needs one transaction's rows (an undo) does not
+        // want a data page read for every old row anyone updated.
+        if (onlyTransactionId is not null)
+        {
+            foreach (var key in chains.Where(c => !c.Value.Any(r => r.TransactionId == onlyTransactionId))
+                                       .Select(c => c.Key).ToList())
+                chains.Remove(key);
         }
 
         if (chains.Count == 0)
