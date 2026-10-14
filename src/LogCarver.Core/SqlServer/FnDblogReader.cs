@@ -104,7 +104,8 @@ public static class FnDblogReader
         SELECT [Current LSN] AS Lsn, [Operation] AS Operation, [Context] AS Context,
                [Offset in Row] AS OffsetInRow, [AllocUnitName] AS AllocUnitName,
                [Page ID] AS PageId, [Slot ID] AS SlotId, [Transaction ID] AS TransactionId,
-               [RowLog Contents 0] AS Rlc0, [RowLog Contents 1] AS Rlc1
+               [RowLog Contents 0] AS Rlc0, [RowLog Contents 1] AS Rlc1,
+               [RowLog Contents 4] AS Rlc4
         FROM fn_dblog(NULL, @commitLsn)
         WHERE [AllocUnitName] = @allocUnitName
           AND [Context] IN ('LCX_CLUSTERED', 'LCX_MARK_AS_GHOST', 'LCX_HEAP')
@@ -155,6 +156,7 @@ public static class FnDblogReader
         int ordTxId = reader.GetOrdinal("TransactionId");
         int ordRlc0 = reader.GetOrdinal("Rlc0");
         int ordRlc1 = reader.GetOrdinal("Rlc1");
+        int ordRlc4 = reader.GetOrdinal("Rlc4");
 
         while (await reader.ReadAsync(ct))
         {
@@ -168,7 +170,8 @@ public static class FnDblogReader
                 SlotId: reader.IsDBNull(ordSlot) ? null : reader.GetInt32(ordSlot),
                 TransactionId: reader.IsDBNull(ordTxId) ? null : reader.GetString(ordTxId),
                 RowLogContents0: reader.IsDBNull(ordRlc0) ? null : (byte[])reader[ordRlc0],
-                RowLogContents1: reader.IsDBNull(ordRlc1) ? null : (byte[])reader[ordRlc1]));
+                RowLogContents1: reader.IsDBNull(ordRlc1) ? null : (byte[])reader[ordRlc1],
+                RowLogContents4: reader.IsDBNull(ordRlc4) ? null : (byte[])reader[ordRlc4]));
         }
         return results;
     }

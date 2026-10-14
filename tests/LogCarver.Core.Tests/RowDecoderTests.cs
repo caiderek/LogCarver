@@ -192,6 +192,48 @@ public class RowDecoderTests
         Assert.Null(result["ColB"]);
     }
 
+    // dbo.E: Id INT, A NVARCHAR(20) NULL, B NVARCHAR(20) NULL. Real INSERT
+    // images (SQL Server 2025) of (1, N'x', N''), (2, N'x', NULL), (3, N'', N'').
+    private static readonly IReadOnlyList<ColumnSchema> EmptyVsNullSchema =
+    [
+        new ColumnSchema("Id", 1, LeafOffset: 4, LeafNullBit: 1, MaxLength: 4, SystemTypeId: 56),
+        new ColumnSchema("A", 2, LeafOffset: -1, LeafNullBit: 2, MaxLength: 40, SystemTypeId: 231),
+        new ColumnSchema("B", 3, LeafOffset: -2, LeafNullBit: 3, MaxLength: 40, SystemTypeId: 231),
+    ];
+
+    [Fact]
+    public void Decode_TrailingEmptyString_OmittedFromOffsetArray_IsEmptyNotNull()
+    {
+        // B = '' is the last variable column, so its offset-array entry is
+        // dropped just like a NULL one - only the null bitmap (bit clear)
+        // says it is an empty string.
+        var result = RowDecoder.Decode(Convert.FromHexString("3000080001000000030000010011007800"), EmptyVsNullSchema);
+
+        Assert.Equal("x", result["A"]);
+        Assert.Equal("", result["B"]);
+    }
+
+    [Fact]
+    public void Decode_TrailingNull_OmittedFromOffsetArray_StaysNull()
+    {
+        var result = RowDecoder.Decode(Convert.FromHexString("3000080002000000030004010011007800"), EmptyVsNullSchema);
+
+        Assert.Equal("x", result["A"]);
+        Assert.Null(result["B"]);
+    }
+
+    [Fact]
+    public void Decode_RowWithNoVariableSection_AllEmptyStringsAreEmptyNotMissing()
+    {
+        // Both variable columns are '' so the row has no variable section at
+        // all (status byte has no 0x20); they used to be absent from the result.
+        var result = RowDecoder.Decode(Convert.FromHexString("1000080003000000030000"), EmptyVsNullSchema);
+
+        Assert.Equal(3, result["Id"]);
+        Assert.Equal("", result["A"]);
+        Assert.Equal("", result["B"]);
+    }
+
     [Fact]
     public void Decode_EmptyStringVariableColumn_IsNotConfusedWithNull()
     {

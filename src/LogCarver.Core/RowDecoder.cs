@@ -426,10 +426,37 @@ public static class RowDecoder
             // Trailing variable-length columns omitted entirely from the row
             // (SQL Server drops the offset-array entry for a NULL column
             // that's last in declaration order) - verified in 研究紀錄 第九節.
+            // The null bitmap still tells NULL from an empty string, which
+            // is dropped the same way: found 2026-10-14 by comparing decoded
+            // UPDATE after-images against the table's real contents - a
+            // trailing '' came back as NULL (13 of 391 rows in a random
+            // workload), and an undo built from it would write NULL.
             for (int i = varColCount; i < varCols.Count; i++)
             {
-                if (varCols[i].Name != ColumnSchema.ReservedUniquifierSlotName)
-                    result[varCols[i].Name] = null;
+                var omitted = varCols[i];
+                if (omitted.Name == ColumnSchema.ReservedUniquifierSlotName)
+                    continue;
+
+                bool storedInThisRow = omitted.LeafNullBit > 0 && omitted.LeafNullBit <= colCount;
+                result[omitted.Name] = storedInThisRow && !IsColNull(row, nullBitmapStart, omitted.LeafNullBit)
+                    ? DefaultEmptyVariableLengthValue(omitted)
+                    : null;
+            }
+        }
+        else
+        {
+            // No variable-length section at all: every variable column is
+            // either NULL or an empty string, and only the null bitmap says
+            // which. These used to be left out of the result entirely.
+            foreach (var varCol in schema.Where(c => c.LeafOffset < 0))
+            {
+                if (varCol.Name == ColumnSchema.ReservedUniquifierSlotName)
+                    continue;
+
+                bool storedInThisRow = varCol.LeafNullBit > 0 && varCol.LeafNullBit <= colCount;
+                result[varCol.Name] = storedInThisRow && !IsColNull(row, nullBitmapStart, varCol.LeafNullBit)
+                    ? DefaultEmptyVariableLengthValue(varCol)
+                    : null;
             }
         }
 

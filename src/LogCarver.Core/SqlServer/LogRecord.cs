@@ -27,6 +27,12 @@ namespace LogCarver.Core.SqlServer;
 /// list here currently only contributes to a coarser, whole-update note
 /// via RowHistoryReconstructor, not a per-column one.
 /// </param>
+/// <param name="RowLogContents4">
+/// Only LOP_MODIFY_COLUMNS uses it: the old and new bytes of each edit
+/// (see ModifyColumnsPatcher). Null when the reader does not supply it
+/// (the offline scanner does not), in which case a LOP_MODIFY_COLUMNS
+/// record stays undecoded and is flagged for manual review.
+/// </param>
 public sealed record LogRecord(
     string Lsn,
     string Operation,
@@ -39,4 +45,5 @@ public sealed record LogRecord(
     byte[]? RowLogContents0,
     byte[]? RowLogContents1,
     IReadOnlyList<int>? PossiblyCorruptedOffsetsInRowLogContents0 = null,
-    IReadOnlyList<int>? PossiblyCorruptedOffsetsInRowLogContents1 = null);
+    IReadOnlyList<int>? PossiblyCorruptedOffsetsInRowLogContents1 = null,
+    byte[]? RowLogContents4 = null);
