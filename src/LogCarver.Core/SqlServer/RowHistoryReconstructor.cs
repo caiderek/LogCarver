@@ -113,6 +113,10 @@ public static class RowHistoryReconstructor
         // they undo (the latest still-standing one of the same transaction).
         // Per transaction: the index of the event each processed record
         // produced, or -1 when it produced none.
+        // The latest INSERT of each transaction: a page split logs the first
+        // moved row as an INSERT on the new page, and its LOP_DELETE_SPLIT
+        // (same transaction) says where the rest went.
+        var lastInsertOfTx = new Dictionary<string, (string PageId, int EventIndex, string Key)>();
         var undoStack = new Dictionary<string, Stack<(int Event, string Operation, string PageId, int Slot)>>();
         var cancelled = new HashSet<int>();
         // Transactions with a compensation record that is not the inverse of
@@ -190,6 +194,44 @@ public static class RowHistoryReconstructor
 
             switch (record.Operation)
             {
+                // A page split. Rows from the split slot up were moved to a new
+                // page, in order; the log has no record per moved row. The
+                // row logged as an INSERT on the new page is the first of
+                // them, not a new row.
+                case "LOP_DELETE_SPLIT":
+                    {
+                        if (record.TransactionId is not null &&
+                            lastInsertOfTx.TryGetValue(record.TransactionId, out var firstMoved) &&
+                            firstMoved.PageId != record.PageId)
+                        {
+                            var (moved, phantom) = rowKeys.ObserveSplit(record.PageId, record.SlotId.Value, firstMoved.PageId);
+                            foreach (var movedKey in moved)
+                            {
+                                if (state.TryGetValue(movedKey, out var movedState) && movedState.PageId != firstMoved.PageId)
+                                    Remember(movedKey, firstMoved.PageId, movedState with { PageId = firstMoved.PageId });
+                            }
+
+                            // The phantom INSERT is the row at new slot 0 only if
+                            // its bytes are that row's; otherwise it is left as
+                            // reported rather than guessed away.
+                            if (phantom is not null && moved.Count > 0 && phantom != moved[0] &&
+                                state.TryGetValue(phantom, out var phantomState) &&
+                                state.TryGetValue(moved[0], out var firstState) &&
+                                phantomState.Bytes.AsSpan().SequenceEqual(firstState.Bytes))
+                            {
+                                cancelled.Add(firstMoved.EventIndex);
+                                state.Remove(phantom);
+                                if (rowsByPage.TryGetValue(firstMoved.PageId, out var newPageKeys))
+                                    newPageKeys.Remove(phantom);
+                            }
+                        }
+                        else
+                        {
+                            rowKeys.ForgetFromSlot(record.PageId, record.SlotId.Value);
+                        }
+                        break;
+                    }
+
                 case "LOP_INSERT_ROWS" when record.RowLogContents0 is { Length: > 0 } bytes:
                     {
                         // A heap row that no longer fits where it is gets moved:
@@ -222,6 +264,8 @@ public static class RowHistoryReconstructor
                         if (corruptedColumns.Count > 0) note = WithNote(note, BuildColumnCorruptionNote(corruptedColumns));
                         events.Add(new RowEvent(record.Lsn, RowEventKind.Insert, null, decoded, note, TimestampOf(record), record.PageId, record.SlotId.Value, record.TransactionId));
                         Remember(key, record.PageId, new RowState(bytes, record.Lsn, recordTouchedABoundary, record.PageId));
+                        if (record.TransactionId is not null)
+                            lastInsertOfTx[record.TransactionId] = (record.PageId, events.Count - 1, key);
                         break;
                     }
 

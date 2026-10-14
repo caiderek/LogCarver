@@ -109,6 +109,58 @@ public sealed class RowKeyIndex
             ShiftDown(slots, slot);
     }
 
+    /// <summary>
+    /// A page split (LOP_DELETE_SPLIT): every row of <paramref name="oldPage"/>
+    /// at <paramref name="fromSlot"/> or above is moved to the freshly
+    /// formatted <paramref name="newPage"/>, keeping its order, so old slot n
+    /// becomes new slot n - fromSlot. The log holds no record per moved row,
+    /// which is why this has to be modelled: without it every later record
+    /// for a moved row is looked up at a slot that no longer means that row.
+    /// Returns the keys that moved (in new-slot order) and the key an INSERT
+    /// logged at the new page's slot 0 had been given, if any - that INSERT is
+    /// the first moved row itself, not a new row.
+    /// </summary>
+    public (IReadOnlyList<string> Moved, string? PhantomAtSlotZero) ObserveSplit(string oldPage, int fromSlot, string newPage)
+    {
+        string? phantom = null;
+        if (!_slotsByPage.TryGetValue(newPage, out var target))
+            _slotsByPage[newPage] = target = [];
+        else if (target.TryGetValue(0, out var atZero))
+            phantom = atZero;
+        foreach (var key in target.Values.ToList())
+            _placeByKey.Remove(key);
+        target.Clear();
+
+        var moved = new List<string>();
+        if (_slotsByPage.TryGetValue(oldPage, out var source))
+        {
+            foreach (var (slot, key) in source.Where(kv => kv.Key >= fromSlot).OrderBy(kv => kv.Key).ToList())
+            {
+                source.Remove(slot);
+                int newSlot = slot - fromSlot;
+                target[newSlot] = key;
+                _placeByKey[key] = (newPage, newSlot);
+                moved.Add(key);
+            }
+        }
+        return (moved, phantom);
+    }
+
+    /// <summary>
+    /// A split whose destination is not known: what the slots from
+    /// <paramref name="fromSlot"/> up mean is no longer known, so they are
+    /// forgotten rather than left to point at the wrong rows.
+    /// </summary>
+    public void ForgetFromSlot(string page, int fromSlot)
+    {
+        if (!_slotsByPage.TryGetValue(page, out var slots)) return;
+        foreach (var (slot, key) in slots.Where(kv => kv.Key >= fromSlot).ToList())
+        {
+            slots.Remove(slot);
+            _placeByKey.Remove(key);
+        }
+    }
+
     private bool KeyAtIs(string page, int slot, string key) =>
         _slotsByPage.TryGetValue(page, out var slots) && slots.TryGetValue(slot, out var k) && k == key;
 

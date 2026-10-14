@@ -96,6 +96,7 @@ public static class RowImageAnchoring
         // may serve as the image source.
         var splitMoves = new Dictionary<string, LogRecord>();
         var lastDeleteLsn = new Dictionary<string, string>();
+        var lastInsertPageOfTx = new Dictionary<string, string>();
         var deletesByPage = new Dictionary<string, List<LogRecord>>();
         var churnByPage = new Dictionary<string, List<(string Lsn, int Slot, bool Clustered)>>();
 
@@ -110,6 +111,25 @@ public static class RowImageAnchoring
                 lastDeleteLsn[key] = record.Lsn;
                 rowKeys.ObserveDelete(record);
             }
+            else if (record.Operation == "LOP_DELETE_SPLIT")
+            {
+                // The same bookkeeping as the reconstructor: rows from the
+                // split slot up are on the new page now, and nothing that
+                // relied on those slots of the old page holds any more.
+                if (!churnByPage.TryGetValue(record.PageId, out var splitChurn))
+                    churnByPage[record.PageId] = splitChurn = [];
+                splitChurn.Add((record.Lsn, record.SlotId.Value, true));
+
+                if (record.TransactionId is not null &&
+                    lastInsertPageOfTx.TryGetValue(record.TransactionId, out var newPage) && newPage != record.PageId)
+                    rowKeys.ObserveSplit(record.PageId, record.SlotId.Value, newPage);
+                else
+                    rowKeys.ForgetFromSlot(record.PageId, record.SlotId.Value);
+                continue;
+            }
+
+            if (record.Operation == "LOP_INSERT_ROWS" && record.TransactionId is not null)
+                lastInsertPageOfTx[record.TransactionId] = record.PageId;
 
             if (record.Operation is "LOP_INSERT_ROWS" or "LOP_DELETE_ROWS")
             {
