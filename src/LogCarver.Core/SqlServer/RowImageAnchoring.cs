@@ -49,16 +49,23 @@ public static class RowImageAnchoring
 {
     public static Task<IReadOnlyDictionary<string, RowImageSeed>> BuildSeedsAsync(
         SqlConnection connection, string tableName, IReadOnlyList<LogRecord> recordsInLsnOrder,
-        CancellationToken ct = default, string? onlyTransactionId = null) =>
-        BuildSeedsAsync(new SqlAnchorSource(connection, tableName), recordsInLsnOrder, ct, onlyTransactionId);
+        CancellationToken ct = default, string? onlyTransactionId = null, bool logWasBounded = false) =>
+        BuildSeedsAsync(new SqlAnchorSource(connection, tableName), recordsInLsnOrder, ct, onlyTransactionId, logWasBounded);
 
     /// <param name="onlyTransactionId">
     /// When given, only rows this transaction touched are anchored: an undo
     /// does not want a data page read for every old row anyone updated.
     /// </param>
+    /// <param name="logWasBounded">
+    /// The records stop at some LSN (a transaction's commit) although the log
+    /// goes on. A heap row has no key hash, so the data page's slot is only
+    /// trusted if nothing touched that slot since the change - which cannot be
+    /// known past the bound: the row may have been deleted and another row
+    /// put in the same slot. Heap rows are then not anchored from the page.
+    /// </param>
     public static async Task<IReadOnlyDictionary<string, RowImageSeed>> BuildSeedsAsync(
         IAnchorSource source, IReadOnlyList<LogRecord> recordsInLsnOrder,
-        CancellationToken ct = default, string? onlyTransactionId = null)
+        CancellationToken ct = default, string? onlyTransactionId = null, bool logWasBounded = false)
     {
         var seeds = new Dictionary<string, RowImageSeed>();
 
@@ -71,7 +78,15 @@ public static class RowImageAnchoring
         // image (no INSERT of it in the log).
         var chains = new Dictionary<string, List<LogRecord>>();
         var known = new HashSet<string>();
+        // Keys that were inserted again after changes were seen: the present
+        // row may be another incarnation, so the live page and later DELETE
+        // images are not evidence for them.
         var reinserted = new Dictionary<string, LogRecord>();
+        // The subset whose re-insert looks like a page split moving the row
+        // (another page, and the key was not deleted in between): only those
+        // may serve as the image source.
+        var splitMoves = new Dictionary<string, LogRecord>();
+        var lastDeleteLsn = new Dictionary<string, string>();
         var deletesByPage = new Dictionary<string, List<LogRecord>>();
         var churnByPage = new Dictionary<string, List<(string Lsn, int Slot, bool Clustered)>>();
 
@@ -82,7 +97,10 @@ public static class RowImageAnchoring
             if (record.Operation is "LOP_INSERT_ROWS" or "LOP_MODIFY_ROW" or "LOP_MODIFY_COLUMNS")
                 rowKeys.Observe(record, key);
             else if (record.Operation == "LOP_DELETE_ROWS")
+            {
+                lastDeleteLsn[key] = record.Lsn;
                 rowKeys.ObserveDelete(record);
+            }
 
             if (record.Operation is "LOP_INSERT_ROWS" or "LOP_DELETE_ROWS")
             {
@@ -104,8 +122,17 @@ public static class RowImageAnchoring
                 case "LOP_INSERT_ROWS":
                     // The same key inserted again after changes were seen: a
                     // page split moving the row, or a delete and a re-insert.
-                    if (chains.ContainsKey(key) && !known.Contains(key) && record.RowLogContents0 is { Length: > 0 })
-                        reinserted.TryAdd(key, record);
+                    if (chains.TryGetValue(key, out var chainSoFar) && !known.Contains(key) && record.RowLogContents0 is { Length: > 0 })
+                    {
+                        if (reinserted.TryAdd(key, record))
+                        {
+                            var chainEnd = chainSoFar[^1];
+                            bool deletedSince = lastDeleteLsn.TryGetValue(key, out var deletedAt) &&
+                                                string.CompareOrdinal(deletedAt, chainEnd.Lsn) > 0;
+                            if (record.PageId != chainEnd.PageId && !deletedSince)
+                                splitMoves[key] = record;
+                        }
+                    }
                     known.Add(key);
                     break;
 
@@ -201,7 +228,7 @@ public static class RowImageAnchoring
             var last = chain[^1];
             string? hash = RowIdentity.KeyHash(last.RowLogContents3);
             var rows = await PageAsync(last.PageId!);
-            byte[]? image = rows is null ? null : PickRow(rows, last, hash, SlotMayHaveChanged);
+            byte[]? image = rows is null ? null : PickRow(rows, last, hash, SlotMayHaveChanged, logWasBounded);
             if (image is not null)
                 onLastPage[key] = image;
             else if (hash is not null)
@@ -229,7 +256,7 @@ public static class RowImageAnchoring
         }
 
         // Decide, per chain, from the sources that verify.
-        var usedDeletes = new HashSet<string>();
+        var candidatesByKey = new Dictionary<string, List<(string Source, byte[] Image, string? DeleteLsn)>>();
         foreach (var (key, chain) in chains)
         {
             var last = chain[^1];
@@ -239,7 +266,7 @@ public static class RowImageAnchoring
                 UndoChain(live, chain) is { } fromLive)
                 candidates.Add(("live", fromLive, null));
 
-            if (reinserted.TryGetValue(key, out var again) && again.RowLogContents0 is { } insertedImage &&
+            if (splitMoves.TryGetValue(key, out var again) && again.RowLogContents0 is { } insertedImage &&
                 UndoChain(insertedImage, chain) is { } fromReinsert)
                 candidates.Add(("reinsert", fromReinsert, null));
 
@@ -247,7 +274,7 @@ public static class RowImageAnchoring
             {
                 foreach (var delete in deletes)
                 {
-                    if (string.CompareOrdinal(delete.Lsn, last.Lsn) <= 0 || usedDeletes.Contains(delete.Lsn)) continue;
+                    if (string.CompareOrdinal(delete.Lsn, last.Lsn) <= 0) continue;
                     if (delete.SlotId != last.SlotId) continue;
                     if (SlotMayHaveChanged(last.PageId!, last.SlotId!.Value, last.Context != "LCX_HEAP", last.Lsn, delete.Lsn)) continue;
                     if (reinserted.TryGetValue(key, out var ins) && string.CompareOrdinal(delete.Lsn, ins.Lsn) > 0) continue;
@@ -256,14 +283,25 @@ public static class RowImageAnchoring
                 }
             }
 
+            candidatesByKey[key] = candidates;
+        }
+
+        // One DELETE image can only be one row's last image. If it verifies
+        // for several chains, which of them it belongs to is not known, and
+        // handing it to whichever came first would make the result depend on
+        // the order: none of them takes it as a source.
+        var chainsPerDelete = candidatesByKey.Values
+            .SelectMany(c => c.Where(x => x.DeleteLsn is not null).Select(x => x.DeleteLsn!))
+            .GroupBy(l => l).ToDictionary(g => g.Key, g => g.Count());
+
+        foreach (var (key, candidates) in candidatesByKey)
+        {
             // Exactly one source. Two that verify mean the same bytes could
             // belong to a deleted-and-reinserted row, or to another row: no seed.
-            if (candidates.Count != 1)
+            if (candidates.Count != 1 || (candidates[0].DeleteLsn is { } d && chainsPerDelete[d] > 1))
                 continue;
 
-            seeds[key] = new RowImageSeed(candidates[0].Image, chain[0].Lsn);
-            if (candidates[0].DeleteLsn is { } used)
-                usedDeletes.Add(used);
+            seeds[key] = new RowImageSeed(candidates[0].Image, chains[key][0].Lsn);
         }
 
         return seeds;
@@ -276,7 +314,7 @@ public static class RowImageAnchoring
     /// </summary>
     private static byte[]? PickRow(
         IReadOnlyList<PageRow> rows, LogRecord last, string? hash,
-        Func<string, int, bool, string, string, bool> slotMayHaveChanged)
+        Func<string, int, bool, string, string, bool> slotMayHaveChanged, bool logWasBounded)
     {
         var present = rows.Where(r => r.RecordType is "PRIMARY_RECORD" or "FORWARDED_RECORD").ToList();
 
@@ -288,6 +326,9 @@ public static class RowImageAnchoring
 
         if (last.Context != "LCX_HEAP")
             return null; // a clustered row with no hash has no identity on the page
+
+        if (logWasBounded)
+            return null; // what happened to the slot after the bound is not visible
 
         // The upper bound is "now": everything after the change counts.
         if (slotMayHaveChanged(last.PageId!, last.SlotId!.Value, false, last.Lsn, "\uffff"))

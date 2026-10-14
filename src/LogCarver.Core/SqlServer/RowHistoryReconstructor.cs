@@ -113,8 +113,12 @@ public static class RowHistoryReconstructor
         // they undo (the latest still-standing one of the same transaction).
         // Per transaction: the index of the event each processed record
         // produced, or -1 when it produced none.
-        var undoStack = new Dictionary<string, Stack<int>>();
+        var undoStack = new Dictionary<string, Stack<(int Event, string Operation, string PageId, int Slot)>>();
         var cancelled = new HashSet<int>();
+        // Transactions with a compensation record that is not the inverse of
+        // the record it would have to undo: nothing is cancelled for it and
+        // its events are flagged instead of guessed at.
+        var unmatchedRollback = new HashSet<string>();
 
         void Remember(string key, string pageId, RowState row)
         {
@@ -173,7 +177,13 @@ public static class RowHistoryReconstructor
             // image, if one was recovered for it.
             if (record.Operation is "LOP_MODIFY_ROW" or "LOP_MODIFY_COLUMNS" &&
                 !state.ContainsKey(key) && seeded.Add(key) &&
-                seedImages is not null && seedImages.TryGetValue(key, out var seed))
+                seedImages is not null && seedImages.TryGetValue(key, out var seed) &&
+                // The seed is the row as it was before its first logged
+                // change, but it may have been written at any time before
+                // that. A DDL boundary before it could mean the bytes are in
+                // an older layout than the schema in hand, and nothing
+                // here can tell, so such a seed is not used.
+                !ddlBoundaryLsns.Any(boundary => string.CompareOrdinal(boundary, seed.AsOfLsn) < 0))
             {
                 Remember(key, record.PageId, new RowState(seed.Bytes, seed.AsOfLsn, false, record.PageId, Anchored: true));
             }
@@ -376,28 +386,60 @@ public static class RowHistoryReconstructor
                 record.Operation is "LOP_INSERT_ROWS" or "LOP_MODIFY_ROW" or "LOP_MODIFY_COLUMNS" or "LOP_DELETE_ROWS")
             {
                 if (!undoStack.TryGetValue(record.TransactionId, out var stack))
-                    undoStack[record.TransactionId] = stack = new Stack<int>();
+                    undoStack[record.TransactionId] = stack = new Stack<(int, string, string, int)>();
 
                 if (record.IsCompensation)
                 {
-                    // Whatever this record produced is not reported, and the
-                    // record it undoes is no longer a change.
+                    // Whatever this record produced is not reported.
                     if (events.Count > eventsBefore)
                         events.RemoveRange(eventsBefore, events.Count - eventsBefore);
-                    if (stack.Count > 0 && stack.Pop() is var undone and >= 0)
-                        cancelled.Add(undone);
+
+                    // It cancels the record it undoes - which must be the
+                    // latest one still standing, at the same page and slot,
+                    // with the opposite operation. Anything else is not
+                    // understood well enough to cancel on.
+                    if (stack.Count > 0 && IsInverse(stack.Peek(), record))
+                    {
+                        if (stack.Pop().Event is >= 0 and var undone)
+                            cancelled.Add(undone);
+                    }
+                    else
+                    {
+                        unmatchedRollback.Add(record.TransactionId);
+                    }
                 }
                 else
                 {
-                    stack.Push(events.Count > eventsBefore ? eventsBefore : -1);
+                    stack.Push((events.Count > eventsBefore ? eventsBefore : -1, record.Operation, record.PageId, record.SlotId.Value));
                 }
             }
         }
 
-        return cancelled.Count == 0
+        var reported = cancelled.Count == 0
             ? events
             : events.Where((_, index) => !cancelled.Contains(index)).ToList();
+
+        if (unmatchedRollback.Count == 0)
+            return reported;
+
+        return reported.Select(e => e.TransactionId is not null && unmatchedRollback.Contains(e.TransactionId)
+            ? e with { Note = WithNote(e.Note, UnmatchedRollbackNote) }
+            : e).ToList();
     }
+
+    internal const string UnmatchedRollbackNote =
+        "part of this transaction was rolled back and the rollback could not be matched to the changes it undid - " +
+        "this change may have been rolled back";
+
+    private static bool IsInverse((int Event, string Operation, string PageId, int Slot) original, LogRecord compensation) =>
+        original.PageId == compensation.PageId && original.Slot == compensation.SlotId &&
+        (original.Operation, compensation.Operation) is
+            ("LOP_INSERT_ROWS", "LOP_DELETE_ROWS") or
+            ("LOP_DELETE_ROWS", "LOP_INSERT_ROWS") or
+            ("LOP_MODIFY_ROW", "LOP_MODIFY_ROW") or
+            ("LOP_MODIFY_COLUMNS", "LOP_MODIFY_COLUMNS") or
+            ("LOP_MODIFY_ROW", "LOP_MODIFY_COLUMNS") or
+            ("LOP_MODIFY_COLUMNS", "LOP_MODIFY_ROW");
 
     internal const string BeforeImageUnknownNote =
         "before image unknown - this row's insert (or a prior update) is outside the observed log window";

@@ -181,7 +181,7 @@ public class RowTrackingTests
     }
 
     [Fact]
-    public async Task Anchor_KeyInsertedAgainAfterTheChain_IsNeverTakenFromTheLiveRow()
+    public async Task Anchor_ReInsertOnAnotherPage_IsTheOnlySourceAndTheLiveRowIsNotConsulted()
     {
         // Same key (same hash) inserted again after the changes, with an image
         // that is not the one the chain produced: no seed, and the live row
@@ -200,6 +200,108 @@ public class RowTrackingTests
         Assert.Equal(Before, Convert.ToHexString(Assert.Single(seeds.Values).Bytes));
         Assert.DoesNotContain("0001:F9", source.PagesRead);
         Assert.DoesNotContain("0001:F8", source.PagesRead);
+    }
+
+    [Fact]
+    public async Task Anchor_ReInsertOnTheSamePage_IsNotAnImageSource()
+    {
+        // The same key inserted again on the chain's own page is a delete and
+        // a re-insert (or another row), not a page split moving the row.
+        var source = new FakeSource(new());
+        var records = new List<LogRecord>
+        {
+            ModifyColumns("00000002", "0001:F8", 1),
+            Insert("00000003", "0001:F8", 4, After, HashLockInfo, tx: "T2"),
+        };
+
+        Assert.Empty(await SeedsAsync(source, records));
+    }
+
+    [Fact]
+    public async Task Anchor_ReInsertAfterTheKeyWasDeleted_IsNotAnImageSource()
+    {
+        // The DELETE's own image does not verify (so it is no source either);
+        // the later re-insert on another page must not be taken as a move.
+        var source = new FakeSource(new());
+        var records = new List<LogRecord>
+        {
+            ModifyColumns("00000002", "0001:F8", 1),
+            Delete("00000003", "0001:F8", 1, WithA(After, 0x7F), tx: "T2"),
+            Insert("00000004", "0001:F9", 0, After, HashLockInfo, tx: "T3"),
+        };
+
+        Assert.Empty(await SeedsAsync(source, records));
+    }
+
+    [Fact]
+    public void Tracking_RollbackThatIsNotTheInverseOfTheLatestChange_CancelsNothingAndIsFlagged()
+    {
+        // The compensation is at a slot nothing was changed at: it cannot be
+        // matched to the record it undoes, so both inserts stay, flagged.
+        LogRecord[] records =
+        [
+            Insert("00000001", "0001:F8", 1, Before, HashLockInfo, tx: "T1"),
+            Insert("00000002", "0001:F8", 2, WithA(Before, 0x63), OtherHashLockInfo, tx: "T1"),
+            Delete("00000003", "0001:F8", 5, WithA(Before, 0x63), tx: "T1", compensation: true),
+        ];
+
+        var history = RowHistoryReconstructor.Reconstruct(records, Schema, ddlBoundaryLsns: []);
+
+        Assert.Equal(2, history.Count);
+        Assert.All(history, e =>
+        {
+            Assert.True(e.NeedsManualReview);
+            Assert.Contains("rolled back", e.Note);
+        });
+    }
+
+    [Fact]
+    public void Tracking_SeedIsNotUsedWhenADdlBoundaryPrecedesIt()
+    {
+        var update = ModifyColumns("00000010", "0001:F8", 1);
+        var seeds = new Dictionary<string, RowImageSeed>
+        {
+            [$"H:dbo.T.PK:61A06ABD401C"] = new RowImageSeed(H(Before), "00000010"),
+        };
+
+        var history = RowHistoryReconstructor.Reconstruct([update], Schema, ddlBoundaryLsns: ["00000005"], seedImages: seeds);
+
+        var only = Assert.Single(history);
+        Assert.Null(only.After);
+        Assert.Contains("before image unknown", only.Note);
+    }
+
+    [Fact]
+    public async Task Anchor_HeapRow_IsNotTakenFromThePageWhenTheLogWasReadOnlyUpToACommit()
+    {
+        // Past the bound the slot may have been emptied and given to another
+        // row; the page still verifies (same bytes) but proves nothing.
+        string after = WithA(Before, 0x0B);
+        var update = ModifyRow("00000002", "0001:F8", 3, "0A000000", "0B000000", HeapLockInfo);
+        var source = new FakeSource(new() { ["0001:F8"] = [Row(3, after, null)] });
+
+        var unbounded = await RowImageAnchoring.BuildSeedsAsync(source, [update], default, null, logWasBounded: false);
+        Assert.Single(unbounded);
+
+        var bounded = await RowImageAnchoring.BuildSeedsAsync(source, [update], default, null, logWasBounded: true);
+        Assert.Empty(bounded);
+    }
+
+    [Fact]
+    public async Task Anchor_OneDeleteImageThatVerifiesForTwoChains_IsGivenToNeither()
+    {
+        // Two rows (two hashes) changed on the same page and slot over time;
+        // a single DELETE image verifies for both chains. Which one it belongs
+        // to is not known, so no seed - and never "whichever came first".
+        var source = new FakeSource(new());
+        var records = new List<LogRecord>
+        {
+            ModifyColumns("00000002", "0001:F8", 1),
+            ModifyColumns("00000003", "0001:F8", 1, lockInfoHex: OtherHashLockInfo, tx: "T2"),
+            Delete("00000004", "0001:F8", 1, After, tx: "T3"),
+        };
+
+        Assert.Empty(await SeedsAsync(source, records));
     }
 
     [Fact]
@@ -232,7 +334,7 @@ public class RowTrackingTests
     }
 
     [Fact]
-    public void Tracking_AnUpdateForAnUnknownRow_IsNeverAppliedToTheRowThatNowSitsAtItsOldSlot()
+    public void Tracking_UpdateWhoseOldBytesAreNotTheRowAtItsSlot_IsRefusedNotApplied()
     {
         // X (hash 8194443284A0) was updated but its INSERT is not in the log;
         // slot 1 is now B's. The record's old bytes are not B's.
@@ -263,7 +365,6 @@ public class RowTrackingTests
     [Fact]
     public void Tracking_RolledBackUpdate_ReportsNothingAndLeavesTheRowAsItWas()
     {
-        string changed = WithA(Before, 0x0B);
         LogRecord[] records =
         [
             Insert("00000001", "0001:F8", 1, Before, HashLockInfo, tx: "T0"),
@@ -280,7 +381,6 @@ public class RowTrackingTests
         Assert.Equal("00000004", history[1].Lsn);
         Assert.Equal(10, history[1].Before!["A"]);
         Assert.Equal(12, history[1].After!["A"]);
-        Assert.NotEqual(Before, changed);
     }
 
     [Fact]
