@@ -63,11 +63,18 @@ public static class RowHistoryReconstructor
 
     private static bool HasAny(IReadOnlyList<int>? offsets) => offsets is { Count: > 0 };
 
+    /// <param name="seedImages">
+    /// Known images, by <see cref="RowIdentity"/>, of rows whose INSERT lies
+    /// outside the records given (see RowImageAnchoring). Used only as the
+    /// starting image of a row's first UPDATE; null or missing entries leave
+    /// that UPDATE reported as "before image unknown".
+    /// </param>
     public static IReadOnlyList<RowEvent> Reconstruct(
         IEnumerable<LogRecord> recordsInLsnOrder,
         IReadOnlyList<ColumnSchema> schema,
         IReadOnlyList<string> ddlBoundaryLsns,
-        IReadOnlyDictionary<string, DateTime>? transactionBeginTimes = null)
+        IReadOnlyDictionary<string, DateTime>? transactionBeginTimes = null,
+        IReadOnlyDictionary<string, RowImageSeed>? seedImages = null)
     {
         var events = new List<RowEvent>();
 
@@ -76,18 +83,28 @@ public static class RowHistoryReconstructor
                 ? t
                 : null;
 
-        // Per physical slot: the most recently known row image, the LSN it
-        // was actually written at, and whether that image's own record
+        // Per row (see RowIdentity): the most recently known row image, the
+        // LSN it was actually written at, whether that image's own record
         // touched a boundary anywhere in its RowLogContents (coarse - see
         // UpdateCorruptionNote for why this stays whole-record rather than
         // per-column) - a corrupt base image taints every future UPDATE
-        // spliced onto it, not just the record it came from. The write
-        // LSN - not the LSN of whatever record we're currently looking
-        // at - is what the schema-drift guard must check: a row untouched
-        // since before a metadata-only DDL (e.g. ADD COLUMN) is still
-        // physically in the old layout even if we're now looking at it
-        // from a later point in the log.
-        var state = new Dictionary<(string PageId, int SlotId), (byte[] Bytes, string WrittenAtLsn, bool PossiblyCorrupted)>();
+        // spliced onto it, not just the record it came from - and the page
+        // it was last seen on. The write LSN - not the LSN of whatever
+        // record we're currently looking at - is what the schema-drift guard
+        // must check: a row untouched since before a metadata-only DDL
+        // (e.g. ADD COLUMN) is still physically in the old layout even if
+        // we're now looking at it from a later point in the log.
+        var state = new Dictionary<string, RowState>();
+        var rowsByPage = new Dictionary<string, HashSet<string>>();
+        var seeded = new HashSet<string>();
+
+        void Remember(string key, string pageId, RowState row)
+        {
+            state[key] = row;
+            if (!rowsByPage.TryGetValue(pageId, out var keys))
+                rowsByPage[pageId] = keys = [];
+            keys.Add(key);
+        }
 
         static string? WithNote(string? existing, string? addition) => addition is null
             ? existing
@@ -95,11 +112,8 @@ public static class RowHistoryReconstructor
 
         // Shared by LOP_MODIFY_ROW and LOP_MODIFY_COLUMNS once each has
         // produced the row's after-image: decode both images and record the
-        // new image as the slot's known state.
-        void EmitPatchedUpdate(
-            LogRecord record, (string PageId, int SlotId) key,
-            (byte[] Bytes, string WrittenAtLsn, bool PossiblyCorrupted) before,
-            byte[] afterBytes, bool recordTouchedABoundary)
+        // new image as the row's known state.
+        void EmitPatchedUpdate(LogRecord record, string key, RowState before, byte[] afterBytes, bool recordTouchedABoundary)
         {
             var beforeDecoded = TryDecode(before.Bytes, schema, before.WrittenAtLsn, ddlBoundaryLsns, [], out var beforeNote, out var beforeCorruptedColumns);
             var afterDecoded = TryDecode(afterBytes, schema, record.Lsn, ddlBoundaryLsns, [], out var afterNote, out var afterCorruptedColumns);
@@ -115,34 +129,94 @@ public static class RowHistoryReconstructor
             string? columnCorruptionNote = combinedCorruptedColumns.Count > 0 ? BuildColumnCorruptionNote(combinedCorruptedColumns) : null;
             string? note = WithNote(WithNote(beforeNote ?? afterNote, columnCorruptionNote), possiblyCorrupted ? UpdateCorruptionNote : null);
             events.Add(new RowEvent(record.Lsn, RowEventKind.Update, beforeDecoded, afterDecoded, note, TimestampOf(record), record.PageId!, record.SlotId!.Value, record.TransactionId));
-            state[key] = (afterBytes, record.Lsn, possiblyCorrupted);
+            Remember(key, record.PageId!, new RowState(afterBytes, record.Lsn, possiblyCorrupted, record.PageId!));
         }
+
+        void EmitRefused(LogRecord record, string? note) =>
+            events.Add(new RowEvent(record.Lsn, RowEventKind.Update, null, null, note,
+                TimestampOf(record), record.PageId!, record.SlotId!.Value, record.TransactionId));
 
         foreach (var record in recordsInLsnOrder)
         {
             if (record.PageId is null || record.SlotId is null) continue;
-            var key = (record.PageId, record.SlotId.Value);
+            string key = RowIdentity.Of(record);
             bool recordTouchedABoundary = HasAny(record.PossiblyCorruptedOffsetsInRowLogContents0) || HasAny(record.PossiblyCorruptedOffsetsInRowLogContents1);
+
+            // A row first seen through an UPDATE starts from its anchored
+            // image, if one was recovered for it.
+            if (record.Operation is "LOP_MODIFY_ROW" or "LOP_MODIFY_COLUMNS" &&
+                !state.ContainsKey(key) && seeded.Add(key) &&
+                seedImages is not null && seedImages.TryGetValue(key, out var seed))
+            {
+                Remember(key, record.PageId, new RowState(seed.Bytes, seed.AsOfLsn, false, record.PageId));
+            }
 
             switch (record.Operation)
             {
                 case "LOP_INSERT_ROWS" when record.RowLogContents0 is { Length: > 0 } bytes:
                     {
+                        // A heap row that no longer fits where it is gets moved:
+                        // the log shows a forwarded copy of its old image being
+                        // "inserted" elsewhere, followed by the real change. The
+                        // row already existed, so this is not an INSERT - only
+                        // the location the following changes will be logged at.
+                        if (RowFormat.IsForwardedRecord(bytes))
+                        {
+                            Remember(key, record.PageId, new RowState(bytes, record.Lsn, recordTouchedABoundary, record.PageId));
+                            break;
+                        }
+
                         var decoded = TryDecode(bytes, schema, record.Lsn, ddlBoundaryLsns,
                             record.PossiblyCorruptedOffsetsInRowLogContents0 ?? [], out var note, out var corruptedColumns);
                         if (corruptedColumns.Count > 0) note = WithNote(note, BuildColumnCorruptionNote(corruptedColumns));
                         events.Add(new RowEvent(record.Lsn, RowEventKind.Insert, null, decoded, note, TimestampOf(record), record.PageId, record.SlotId.Value, record.TransactionId));
-                        state[key] = (bytes, record.Lsn, recordTouchedABoundary);
+                        Remember(key, record.PageId, new RowState(bytes, record.Lsn, recordTouchedABoundary, record.PageId));
                         break;
                     }
 
                 case "LOP_DELETE_ROWS" when record.RowLogContents0 is { Length: > 0 } bytes:
                     {
+                        // The pointer left behind where a forwarded row used to
+                        // sit: it carries no data, the row's own DELETE is the
+                        // one logged on the forwarded record.
+                        if (RowFormat.IsForwardingStub(bytes))
+                        {
+                            state.Remove(key);
+                            break;
+                        }
+
+                        // A forwarded record is also removed when the row moves
+                        // back to its original place. That is not a delete if the
+                        // original place has already been given its row back.
+                        if (RowFormat.IsForwardedRecord(bytes) &&
+                            RowFormat.ForwardedFromKey(bytes) is { } origin &&
+                            state.TryGetValue(origin, out var originState) &&
+                            !RowFormat.IsForwardingStub(originState.Bytes))
+                        {
+                            state.Remove(key);
+                            break;
+                        }
+
                         var decoded = TryDecode(bytes, schema, record.Lsn, ddlBoundaryLsns,
                             record.PossiblyCorruptedOffsetsInRowLogContents0 ?? [], out var note, out var corruptedColumns);
                         if (corruptedColumns.Count > 0) note = WithNote(note, BuildColumnCorruptionNote(corruptedColumns));
                         events.Add(new RowEvent(record.Lsn, RowEventKind.Delete, decoded, null, note, TimestampOf(record), record.PageId, record.SlotId.Value, record.TransactionId));
+
+                        // A DELETE carries no key hash, so the row it removes
+                        // is found by its bytes: the image being deleted is
+                        // exactly the last known image of that row.
                         state.Remove(key);
+                        if (rowsByPage.TryGetValue(record.PageId, out var pageKeys))
+                        {
+                            foreach (var candidate in pageKeys.ToList())
+                            {
+                                if (state.TryGetValue(candidate, out var known) && known.Bytes.AsSpan().SequenceEqual(bytes))
+                                {
+                                    state.Remove(candidate);
+                                    pageKeys.Remove(candidate);
+                                }
+                            }
+                        }
                         break;
                     }
 
@@ -156,7 +230,7 @@ public static class RowHistoryReconstructor
                 // treats as the one unacceptable failure mode. Do not merge this
                 // case back with LOP_MODIFY_ROW's. It is only decoded when
                 // ModifyColumnsPatcher can verify every edit against the known
-                // before image; otherwise it is refused and the slot's last known
+                // before image; otherwise it is refused and the row's last known
                 // image is forgotten (it is no longer trustworthy either).
                 case "LOP_MODIFY_COLUMNS":
                     {
@@ -166,26 +240,20 @@ public static class RowHistoryReconstructor
                             record.RowLogContents1 is not { } mc1 ||
                             record.RowLogContents4 is not { } mc4)
                         {
-                            events.Add(new RowEvent(record.Lsn, RowEventKind.Update, null, null,
-                                WithNote($"{notDecoded}: this reader does not supply RowLog Contents 0/1/4)", recordTouchedABoundary ? UpdateCorruptionNote : null),
-                                TimestampOf(record), record.PageId, record.SlotId.Value, record.TransactionId));
+                            EmitRefused(record, WithNote($"{notDecoded}: this reader does not supply RowLog Contents 0/1/4)", recordTouchedABoundary ? UpdateCorruptionNote : null));
                             state.Remove(key);
                             break;
                         }
 
                         if (!state.TryGetValue(key, out var before))
                         {
-                            events.Add(new RowEvent(record.Lsn, RowEventKind.Update, null, null,
-                                WithNote("before image unknown - this row's insert (or a prior update) is outside the observed log window", recordTouchedABoundary ? UpdateCorruptionNote : null),
-                                TimestampOf(record), record.PageId, record.SlotId.Value, record.TransactionId));
+                            EmitRefused(record, WithNote(BeforeImageUnknownNote, recordTouchedABoundary ? UpdateCorruptionNote : null));
                             break;
                         }
 
                         if (!ModifyColumnsPatcher.TryApplyForward(before.Bytes, mc0, mc1, mc4, out var patched, out var failure))
                         {
-                            events.Add(new RowEvent(record.Lsn, RowEventKind.Update, null, null,
-                                WithNote($"{notDecoded}: {failure})", before.PossiblyCorrupted || recordTouchedABoundary ? UpdateCorruptionNote : null),
-                                TimestampOf(record), record.PageId, record.SlotId.Value, record.TransactionId));
+                            EmitRefused(record, WithNote($"{notDecoded}: {failure})", before.PossiblyCorrupted || recordTouchedABoundary ? UpdateCorruptionNote : null));
                             state.Remove(key);
                             break;
                         }
@@ -200,17 +268,44 @@ public static class RowHistoryReconstructor
                             record.RowLogContents0 is not { } rlc0 ||
                             record.RowLogContents1 is not { } rlc1)
                         {
-                            events.Add(new RowEvent(record.Lsn, RowEventKind.Update, null, null,
-                                WithNote("diff not available (missing offset or RowLog Contents)", recordTouchedABoundary ? UpdateCorruptionNote : null),
-                                TimestampOf(record), record.PageId, record.SlotId.Value, record.TransactionId));
+                            EmitRefused(record, WithNote("diff not available (missing offset or RowLog Contents)", recordTouchedABoundary ? UpdateCorruptionNote : null));
+                            break;
+                        }
+
+                        // Heap forwarding. The row's real change is logged on the
+                        // forwarded copy; what happens at the original place is
+                        // only bookkeeping, so it produces no event of its own.
+                        if (offset == 0 && RowFormat.IsForwardingStub(rlc1))
+                        {
+                            // Row -> pointer to where it went.
+                            Remember(key, record.PageId, new RowState(rlc1, record.Lsn, false, record.PageId));
+                            break;
+                        }
+
+                        if (offset == 0 && RowFormat.IsForwardingStub(rlc0) && RowFormat.IsPrimaryRecord(rlc1))
+                        {
+                            // Pointer -> the row has come back here.
+                            Remember(key, record.PageId, new RowState(rlc1, record.Lsn, recordTouchedABoundary, record.PageId));
                             break;
                         }
 
                         if (!state.TryGetValue(key, out var before))
                         {
-                            events.Add(new RowEvent(record.Lsn, RowEventKind.Update, null, null,
-                                WithNote("before image unknown - this row's insert (or a prior update) is outside the observed log window", recordTouchedABoundary ? UpdateCorruptionNote : null),
-                                TimestampOf(record), record.PageId, record.SlotId.Value, record.TransactionId));
+                            EmitRefused(record, WithNote(BeforeImageUnknownNote, recordTouchedABoundary ? UpdateCorruptionNote : null));
+                            break;
+                        }
+
+                        // RowLogContents0 is, by definition, the old bytes of
+                        // the span being replaced - they must be what the
+                        // known image has there. A mismatch means the image
+                        // is not this row's (or is stale), and splicing would
+                        // yield a plausible-looking wrong row.
+                        if (offset < 0 || offset + rlc0.Length > before.Bytes.Length ||
+                            !before.Bytes.AsSpan(offset, rlc0.Length).SequenceEqual(rlc0))
+                        {
+                            EmitRefused(record, WithNote("patch refused - the logged old bytes do not match the known before image",
+                                before.PossiblyCorrupted || recordTouchedABoundary ? UpdateCorruptionNote : null));
+                            state.Remove(key);
                             break;
                         }
 
@@ -226,10 +321,8 @@ public static class RowHistoryReconstructor
                             // byte-range splice that no longer lines up) -
                             // surface both images' flags, not just the
                             // current record's.
-                            events.Add(new RowEvent(record.Lsn, RowEventKind.Update, null, null,
-                                WithNote($"patch failed - before image and this diff do not line up ({ex.Message})",
-                                    before.PossiblyCorrupted || recordTouchedABoundary ? UpdateCorruptionNote : null),
-                                TimestampOf(record), record.PageId, record.SlotId.Value, record.TransactionId));
+                            EmitRefused(record, WithNote($"patch failed - before image and this diff do not line up ({ex.Message})",
+                                before.PossiblyCorrupted || recordTouchedABoundary ? UpdateCorruptionNote : null));
                             break;
                         }
 
@@ -241,6 +334,11 @@ public static class RowHistoryReconstructor
 
         return events;
     }
+
+    internal const string BeforeImageUnknownNote =
+        "before image unknown - this row's insert (or a prior update) is outside the observed log window";
+
+    private sealed record RowState(byte[] Bytes, string WrittenAtLsn, bool PossiblyCorrupted, string PageId);
 
     private static IReadOnlyDictionary<string, object?>? TryDecode(
         byte[] bytes, IReadOnlyList<ColumnSchema> schema, string lsn, IReadOnlyList<string> ddlBoundaryLsns,

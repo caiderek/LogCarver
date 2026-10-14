@@ -241,7 +241,10 @@ static async Task<int> RunAsync(string server, string database, string tableName
     // window (or for the requested row) still needs its "before" image,
     // which may have been written outside it. Filtering only affects what
     // gets printed below.
-    var history = RowHistoryReconstructor.Reconstruct(records, schema, ddlBoundaryLsns, transactionTimes);
+    // Rows whose INSERT has already left the log are anchored in their
+    // current (or deleted) state and walked backwards - see RowImageAnchoring.
+    var seeds = await RowImageAnchoring.BuildSeedsAsync(connection, tableName, records);
+    var history = RowHistoryReconstructor.Reconstruct(records, schema, ddlBoundaryLsns, transactionTimes, seeds);
 
     if (options.SnapshotAsOf is { } asOf)
     {
