@@ -429,6 +429,37 @@ public class RowTrackingTests
     }
 
     [Fact]
+    public void Tracking_PageSplitMovesTheRowsFromTheSplitSlotUp_SoLaterRecordsFindThem()
+    {
+        // Rows in slots 0..4 of page F8 (hash-less INSERTs, as after lock
+        // escalation). A split at slot 2 moves slots 2,3,4 to new page F9 as
+        // slots 0,1,2; the log has only an INSERT of the first moved row on F9
+        // and the LOP_DELETE_SPLIT. The row with A = 10 was slot 3, so it is
+        // F9 slot 1 now, and its UPDATE (which carries the key hash) is logged
+        // there.
+        LogRecord[] records =
+        [
+            Insert("00000001", "0001:F8", 0, WithA(Before, 0x01), tx: "T0"),
+            Insert("00000002", "0001:F8", 1, WithA(Before, 0x02), tx: "T0"),
+            Insert("00000003", "0001:F8", 2, WithA(Before, 0x03), tx: "T0"),
+            Insert("00000004", "0001:F8", 3, Before, tx: "T0"),
+            Insert("00000005", "0001:F8", 4, WithA(Before, 0x05), tx: "T0"),
+            Insert("00000010", "0001:F9", 0, WithA(Before, 0x03), tx: "SYS"),
+            new LogRecord("00000011", "LOP_DELETE_SPLIT", "LCX_CLUSTERED", null, "dbo.T.PK", "0001:F8", 2, "SYS", null, null),
+            ModifyColumns("00000020", "0001:F9", 1, tx: "T1"),
+        ];
+
+        var history = RowHistoryReconstructor.Reconstruct(records, Schema, ddlBoundaryLsns: []);
+
+        var update = Assert.Single(history, e => e.Kind == RowEventKind.Update);
+        Assert.False(update.NeedsManualReview);
+        Assert.Equal(10, update.Before!["A"]);
+        Assert.Equal(11, update.After!["A"]);
+        // The first moved row was logged as an INSERT, but it is not a new row.
+        Assert.Equal(5, history.Count(e => e.Kind == RowEventKind.Insert));
+    }
+
+    [Fact]
     public void Tracking_RolledBackInsert_ReportsNothing()
     {
         // INSERT then its compensation (a ghost DELETE) in the same transaction.
