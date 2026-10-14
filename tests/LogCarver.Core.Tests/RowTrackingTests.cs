@@ -321,7 +321,7 @@ public class RowTrackingTests
     }
 
     [Fact]
-    public async Task Anchor_BoundedLog_UsesTheLivePageOnlyWhenNothingAfterTheBoundCouldBeTheRow()
+    public async Task Anchor_BoundedLog_UsesTheLivePageUnlessTheRowMayHaveBeenReplaced()
     {
         var source = new FakeSource(new() { ["0001:F8"] = [Row(1, After, "61A06ABD401C")] });
         var chain = new List<LogRecord> { ModifyColumns("00000002", "0001:F8", 1) };
@@ -331,29 +331,56 @@ public class RowTrackingTests
 
         Assert.Equal(0, await Count(null));                          // unknown: no seed
         Assert.Equal(1, await Count([]));                            // nothing happened since
-        Assert.Equal(1, await Count([                                // another row's change
-            ModifyColumns("00000009", "0001:F8", 7, lockInfoHex: OtherHashLockInfo, tx: "T9")]));
-        Assert.Equal(0, await Count([                                // this key, again
+        Assert.Equal(1, await Count([                                // someone updated it again
             ModifyColumns("00000009", "0001:F8", 1, tx: "T9")]));
-        Assert.Equal(0, await Count([                                // key re-inserted
+        Assert.Equal(1, await Count([                                // a hash-less update (lock escalation)
+            ModifyColumns("00000009", "0001:F8", 1, lockInfoHex: null, tx: "T9")]));
+        Assert.Equal(1, await Count([                                // moved by a page split: no DELETE
             Insert("00000009", "0001:F9", 0, After, HashLockInfo, tx: "T9")]));
-        Assert.Equal(0, await Count([                                // could be anyone's
-            ModifyColumns("00000009", "0001:F8", 7, lockInfoHex: null, tx: "T9")]));
+        Assert.Equal(1, await Count([                                // other rows come and go
+            Delete("00000009", "0001:F8", 7, Before, tx: "T9"),
+            Insert("0000000A", "0001:F8", 8, Before, OtherHashLockInfo, tx: "T9")]));
+        Assert.Equal(0, await Count([                                // deleted, same key inserted again
+            Delete("00000009", "0001:F8", 1, After, tx: "T9"),
+            Insert("0000000A", "0001:F8", 1, After, HashLockInfo, tx: "T9")]));
+        Assert.Equal(0, await Count([                                // deleted, a hash-less insert
+            Delete("00000009", "0001:F8", 1, After, tx: "T9"),
+            Insert("0000000A", "0001:F8", 1, After, null, tx: "T9")]));
     }
 
     [Fact]
-    public async Task Anchor_BoundedLog_HeapRowNeedsAQuietPage()
+    public async Task Anchor_BoundedLog_LaterUpdateOfOtherColumnsStillGivesAWorkingUndoImage()
+    {
+        // The page row has a later change in a column this transaction did not
+        // touch (F, fixed length, at offset 20). The seed is the page row with
+        // only this transaction's change taken back.
+        var laterRow = H(After);
+        laterRow[20] = 0x63;
+        var source = new FakeSource(new() { ["0001:F8"] = [Row(1, Convert.ToHexString(laterRow), "61A06ABD401C")] });
+        var chain = new List<LogRecord> { ModifyColumns("00000002", "0001:F8", 1) };
+
+        var seeds = await RowImageAnchoring.BuildSeedsAsync(source, chain, default, null, true, []);
+
+        var seed = Assert.Single(seeds.Values).Bytes;
+        Assert.Equal(10, seed[8]);       // A back to what this transaction replaced
+        Assert.Equal(0x63, seed[20]);    // the later change is kept
+    }
+
+    [Fact]
+    public async Task Anchor_BoundedLog_HeapRowNeedsNoRowRemovedFromOrAddedToItsPage()
     {
         string after = WithA(Before, 0x0B);
         var update = ModifyRow("00000002", "0001:F8", 3, "0A000000", "0B000000", HeapLockInfo);
         var source = new FakeSource(new() { ["0001:F8"] = [Row(3, after, null)] });
 
-        var quiet = await RowImageAnchoring.BuildSeedsAsync(source, [update], default, null, true, []);
-        Assert.Single(quiet);
+        async Task<int> Count(IReadOnlyList<LogRecord> later) =>
+            (await RowImageAnchoring.BuildSeedsAsync(source, [update], default, null, true, later)).Count;
 
-        var busy = await RowImageAnchoring.BuildSeedsAsync(source, [update], default, null, true,
-            [Delete("00000009", "0001:F8", 3, after, tx: "T9", context: "LCX_HEAP")]);
-        Assert.Empty(busy);
+        Assert.Equal(1, await Count([]));
+        Assert.Equal(1, await Count([                  // an update on the same page
+            ModifyRow("00000009", "0001:F8", 5, "01000000", "02000000", HeapLockInfo, tx: "T9")]));
+        Assert.Equal(0, await Count([Delete("00000009", "0001:F8", 3, after, tx: "T9", context: "LCX_HEAP")]));
+        Assert.Equal(0, await Count([Insert("00000009", "0001:F8", 3, Before, tx: "T9", context: "LCX_HEAP")]));
     }
 
     [Fact]

@@ -358,4 +358,46 @@ public class UndoSqlGeneratorTests
             "DELETE FROM [dbo].[Orders] WHERE [Id] = 1 AND [Loc].STEquals(CONVERT([geography], 0xE6100000010C48E17A14AE073940A4703D0AD7635E40)) = 1;",
             sql);
     }
+
+    [Fact]
+    public void Update_WithAKey_SetsOnlyTheChangedColumnsAndMatchesOnKeyPlusThose()
+    {
+        // Note changed 'old' -> 'new'; Amount is the same in both images (it
+        // may have been changed by someone else since, which must not matter).
+        var evt = MakeEvent(RowEventKind.Update, Row(5, "old", 100), Row(5, "new", 100));
+
+        var sql = UndoSqlGenerator.Generate(evt, "dbo.Orders", keyColumns: ["Id"]);
+
+        Assert.Equal("UPDATE [dbo].[Orders] SET [Note] = N'old' WHERE [Id] = 5 AND [Note] = N'new';", sql);
+    }
+
+    [Fact]
+    public void Update_WithAKey_HandlesNullOnEitherSide()
+    {
+        var evt = MakeEvent(RowEventKind.Update, Row(5, null, 100), Row(5, "new", 100));
+
+        var sql = UndoSqlGenerator.Generate(evt, "dbo.Orders", keyColumns: ["Id"]);
+
+        Assert.Equal("UPDATE [dbo].[Orders] SET [Note] = NULL WHERE [Id] = 5 AND [Note] = N'new';", sql);
+    }
+
+    [Fact]
+    public void Update_WithAKeyThatItselfChanged_FallsBackToTheWholeRow()
+    {
+        var evt = MakeEvent(RowEventKind.Update, Row(5, "same", 100), Row(6, "same", 100));
+
+        var sql = UndoSqlGenerator.Generate(evt, "dbo.Orders", keyColumns: ["Id"]);
+
+        Assert.Equal("UPDATE [dbo].[Orders] SET [Id] = 5, [Note] = N'same', [Amount] = 100 WHERE [Id] = 6 AND [Note] = N'same' AND [Amount] = 100;", sql);
+    }
+
+    [Fact]
+    public void Update_WithoutAKey_StillMatchesTheWholeRow()
+    {
+        var evt = MakeEvent(RowEventKind.Update, Row(5, "old", 100), Row(5, "new", 100));
+
+        var sql = UndoSqlGenerator.Generate(evt, "dbo.Orders");
+
+        Assert.Equal("UPDATE [dbo].[Orders] SET [Id] = 5, [Note] = N'old', [Amount] = 100 WHERE [Id] = 5 AND [Note] = N'new' AND [Amount] = 100;", sql);
+    }
 }

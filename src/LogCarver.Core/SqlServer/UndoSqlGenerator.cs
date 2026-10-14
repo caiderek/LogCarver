@@ -37,12 +37,59 @@ public static class UndoSqlGenerator
     /// kind of best-effort SQL overwrote a column's real ~4000-character
     /// content with a 28-character placeholder and reported success).
     /// </remarks>
-    public static string? Generate(RowEvent evt, string tableName, string? identityColumnName = null) => evt.Kind switch
+    /// <param name="keyColumns">
+    /// The table's primary (or unique clustered) key columns, if known. With
+    /// them an UPDATE is undone at COLUMN level: only the columns this update
+    /// changed are set back, and the row is found by its key plus those
+    /// columns' values after the update. Another writer changing some other
+    /// column of the row since then no longer turns the undo into a no-op,
+    /// and is not overwritten either. A later change to one of the columns
+    /// this update changed is still a conflict (the WHERE does not match).
+    /// Without a key, or if the key itself was changed, the whole row is
+    /// matched as before.
+    /// </param>
+    public static string? Generate(
+        RowEvent evt, string tableName, string? identityColumnName = null, IReadOnlyList<string>? keyColumns = null) => evt.Kind switch
     {
         RowEventKind.Insert when evt.After is not null => SqlStatementBuilder.BuildDelete(evt.After, tableName),
         RowEventKind.Delete when evt.Before is not null => SqlStatementBuilder.BuildInsert(evt.Before, tableName, identityColumnName),
         RowEventKind.Update when evt.Before is not null && evt.After is not null =>
-            SqlStatementBuilder.BuildUpdate(setValues: evt.Before, matchValues: evt.After, tableName, identityColumnName),
+            ColumnLevelUpdate(evt.Before, evt.After, keyColumns) is var (setValues, matchValues)
+                ? SqlStatementBuilder.BuildUpdate(setValues, matchValues, tableName, identityColumnName)
+                : SqlStatementBuilder.BuildUpdate(setValues: evt.Before, matchValues: evt.After, tableName, identityColumnName),
         _ => null,
+    };
+
+    private static (Dictionary<string, object?> Set, Dictionary<string, object?> Match)? ColumnLevelUpdate(
+        IReadOnlyDictionary<string, object?> before, IReadOnlyDictionary<string, object?> after, IReadOnlyList<string>? keyColumns)
+    {
+        if (keyColumns is not { Count: > 0 })
+            return null;
+
+        var changed = before.Keys.Where(c => after.ContainsKey(c) && !SameValue(before[c], after[c])).ToList();
+        if (changed.Count == 0)
+            return null;
+
+        // Every key column must be known on both sides and must not itself
+        // be one of the changed columns.
+        foreach (var key in keyColumns)
+        {
+            if (!before.TryGetValue(key, out var b) || !after.TryGetValue(key, out var a) || !SameValue(b, a))
+                return null;
+        }
+
+        var set = changed.ToDictionary(c => c, c => before[c]);
+        var match = new Dictionary<string, object?>();
+        foreach (var key in keyColumns) match[key] = after[key];
+        foreach (var column in changed) match[column] = after[column];
+        return (set, match);
+    }
+
+    private static bool SameValue(object? x, object? y) => (x, y) switch
+    {
+        (null, null) => true,
+        (null, _) or (_, null) => false,
+        (byte[] bx, byte[] by) => bx.AsSpan().SequenceEqual(by),
+        _ => x.Equals(y),
     };
 }

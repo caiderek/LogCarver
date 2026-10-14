@@ -64,11 +64,12 @@ public static class RowImageAnchoring
     /// </param>
     /// <param name="recordsAfterBound">
     /// The table's records after the bound. With a bounded log, a row is
-    /// anchored from its data page only when none of them can be this row's:
-    /// none carries its key hash, and none is a hash-less INSERT/UPDATE that
-    /// could be it (a heap row, which has no hash, must have had no record at
-    /// all on its page). Null means that is not known, so no row is anchored
-    /// from its page.
+    /// anchored from its data page unless it may have been deleted and
+    /// inserted again (a later DELETE together with a later INSERT of its key
+    /// or a hash-less INSERT; for a heap row, any DELETE or INSERT on its
+    /// page). Later UPDATEs do not matter: undoing the chain on the row as it
+    /// is now takes back only this transaction's changes. Null means the
+    /// later records are not known, so no row is anchored from its page.
     /// </param>
     public static async Task<IReadOnlyDictionary<string, RowImageSeed>> BuildSeedsAsync(
         IAnchorSource source, IReadOnlyList<LogRecord> recordsInLsnOrder,
@@ -254,34 +255,54 @@ public static class RowImageAnchoring
             return rows;
         }
 
-        // With a bounded log: could anything after the bound have been this row?
-        HashSet<string>? hashesAfter = null;
-        HashSet<string>? pagesAfter = null;
-        bool unattributableAfter = false;
+        // With a bounded log: could the row on the data page be a different
+        // incarnation of this row, or a different row in this slot?
+        //
+        // Later UPDATEs - by anyone, of any column - are fine: the chain is
+        // undone on the row as it is now, every step verifies the bytes it
+        // says it wrote, so the result is the row as it is now with only this
+        // transaction's changes taken back, and that is exactly the column
+        // level undo wanted (a later change to the same bytes fails to verify
+        // and is a real conflict). What cannot be told is a row that was
+        // DELETEd and inserted again: a new row, same key. That needs a later
+        // DELETE and a later INSERT.
+        bool deletedAfter = false;
+        bool hashlessInsertAfter = false;
+        var insertedHashesAfter = new HashSet<string>();
+        var deletePagesAfter = new HashSet<string>();
+        var insertPagesAfter = new HashSet<string>();
         if (logWasBounded && recordsAfterBound is not null)
         {
-            hashesAfter = [];
-            pagesAfter = [];
             foreach (var later in recordsAfterBound)
             {
-                if (later.PageId is not null) pagesAfter.Add(later.PageId);
-                string? laterHash = RowIdentity.KeyHash(RowIdentity.LockInformation(later));
-                if (laterHash is not null)
-                    hashesAfter.Add(laterHash);
-                else if (later.Operation is "LOP_INSERT_ROWS" or "LOP_MODIFY_ROW" or "LOP_MODIFY_COLUMNS")
-                    unattributableAfter = true; // could be any row, hashed or not
+                if (later.Operation == "LOP_DELETE_ROWS")
+                {
+                    deletedAfter = true;
+                    if (later.PageId is not null) deletePagesAfter.Add(later.PageId);
+                }
+                else if (later.Operation == "LOP_INSERT_ROWS")
+                {
+                    if (later.PageId is not null) insertPagesAfter.Add(later.PageId);
+                    string? laterHash = RowIdentity.KeyHash(RowIdentity.LockInformation(later));
+                    if (laterHash is not null) insertedHashesAfter.Add(laterHash);
+                    else hashlessInsertAfter = true;
+                }
             }
         }
 
         bool LiveIsAsOfTheBound(LogRecord last, string? hash)
         {
             if (!logWasBounded) return true;
-            if (hashesAfter is null || pagesAfter is null) return false;
+            if (recordsAfterBound is null) return false;
             if (hash is not null)
-                return !hashesAfter.Contains(hash) && !unattributableAfter;
-            // No hash (a heap row): its slot is only the row's if nothing at
-            // all happened on that page afterwards.
-            return !pagesAfter.Contains(last.PageId!);
+            {
+                // A page split re-inserts the same key without any DELETE of
+                // it; only delete + insert can make a new row.
+                return !(deletedAfter && (insertedHashesAfter.Contains(hash) || hashlessInsertAfter));
+            }
+            // No hash (a heap row): its slot is only the row's if no row was
+            // removed from or put on that page afterwards.
+            return !deletePagesAfter.Contains(last.PageId!) && !insertPagesAfter.Contains(last.PageId!);
         }
 
         // Pass 1: where is each chain's row on its last-known page?
