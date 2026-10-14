@@ -70,7 +70,7 @@ public static class RowEventExporter
     /// </summary>
     public static void WriteCsv(
         TextWriter writer, IEnumerable<RowEvent> events, IReadOnlyList<ColumnSchema> schema, string tableName,
-        bool includeUndoSql, bool includeReplaySql)
+        bool includeUndoSql, bool includeReplaySql, IReadOnlyList<string>? keyColumns = null)
     {
         var columns = schema.Select(c => c.Name).ToList();
 
@@ -105,7 +105,7 @@ public static class RowEventExporter
             row.AddRange(columns.Select(c => CellValue(e.Before, c)));
             row.AddRange(columns.Select(c => CellValue(e.After, c)));
             row.Add(e.Note ?? "");
-            if (includeUndoSql) row.Add(UndoSqlGenerator.Generate(e, tableName) ?? "");
+            if (includeUndoSql) row.Add(UndoSqlGenerator.Generate(e, tableName, keyColumns: keyColumns) ?? "");
             if (includeReplaySql) row.Add(ReplaySqlGenerator.Generate(e, tableName) ?? "");
             row.Add(e.NeedsManualReview ? "YES" : "");
             writer.Write(string.Join(",", row.Select(CsvEscape)));
@@ -115,10 +115,10 @@ public static class RowEventExporter
 
     public static string ToCsv(
         IEnumerable<RowEvent> events, IReadOnlyList<ColumnSchema> schema, string tableName,
-        bool includeUndoSql, bool includeReplaySql)
+        bool includeUndoSql, bool includeReplaySql, IReadOnlyList<string>? keyColumns = null)
     {
         var sw = new StringWriter();
-        WriteCsv(sw, events, schema, tableName, includeUndoSql, includeReplaySql);
+        WriteCsv(sw, events, schema, tableName, includeUndoSql, includeReplaySql, keyColumns);
         return sw.ToString();
     }
 
@@ -132,12 +132,12 @@ public static class RowEventExporter
     /// unsupported" apart from "wrote a real script" without re-reading
     /// whatever it just streamed the output to.
     /// </summary>
-    public static int WriteSql(TextWriter writer, IEnumerable<RowEvent> events, string tableName, bool includeUndoSql, bool includeReplaySql)
+    public static int WriteSql(TextWriter writer, IEnumerable<RowEvent> events, string tableName, bool includeUndoSql, bool includeReplaySql, IReadOnlyList<string>? keyColumns = null)
     {
         int produced = 0;
         foreach (var e in events)
         {
-            string? undoSql = includeUndoSql ? UndoSqlGenerator.Generate(e, tableName) : null;
+            string? undoSql = includeUndoSql ? UndoSqlGenerator.Generate(e, tableName, keyColumns: keyColumns) : null;
             string? replaySql = includeReplaySql ? ReplaySqlGenerator.Generate(e, tableName) : null;
             if (undoSql is null && replaySql is null)
                 continue;
@@ -167,10 +167,10 @@ public static class RowEventExporter
         return produced;
     }
 
-    public static string ToSql(IEnumerable<RowEvent> events, string tableName, bool includeUndoSql, bool includeReplaySql)
+    public static string ToSql(IEnumerable<RowEvent> events, string tableName, bool includeUndoSql, bool includeReplaySql, IReadOnlyList<string>? keyColumns = null)
     {
         var sw = new StringWriter();
-        WriteSql(sw, events, tableName, includeUndoSql, includeReplaySql);
+        WriteSql(sw, events, tableName, includeUndoSql, includeReplaySql, keyColumns);
         return sw.ToString();
     }
 
@@ -188,7 +188,7 @@ public static class RowEventExporter
     /// event - the whole point of streaming is to never hold more than one
     /// event's rendered JSON in memory at a time.
     /// </summary>
-    public static void WriteJson(TextWriter writer, IEnumerable<RowEvent> events, string tableName, bool includeUndoSql, bool includeReplaySql)
+    public static void WriteJson(TextWriter writer, IEnumerable<RowEvent> events, string tableName, bool includeUndoSql, bool includeReplaySql, IReadOnlyList<string>? keyColumns = null)
     {
         writer.Write('[');
         bool first = true;
@@ -203,7 +203,7 @@ public static class RowEventExporter
                 ["Before"] = ToJsonObject(e.Before),
                 ["After"] = ToJsonObject(e.After),
                 ["Note"] = e.Note,
-                ["UndoSql"] = includeUndoSql ? UndoSqlGenerator.Generate(e, tableName) : null,
+                ["UndoSql"] = includeUndoSql ? UndoSqlGenerator.Generate(e, tableName, keyColumns: keyColumns) : null,
                 ["ReplaySql"] = includeReplaySql ? ReplaySqlGenerator.Generate(e, tableName) : null,
             };
             writer.Write(first ? "\n" : ",\n");
@@ -213,10 +213,10 @@ public static class RowEventExporter
         writer.Write(first ? "]" : "\n]");
     }
 
-    public static string ToJson(IEnumerable<RowEvent> events, string tableName, bool includeUndoSql, bool includeReplaySql)
+    public static string ToJson(IEnumerable<RowEvent> events, string tableName, bool includeUndoSql, bool includeReplaySql, IReadOnlyList<string>? keyColumns = null)
     {
         var sw = new StringWriter();
-        WriteJson(sw, events, tableName, includeUndoSql, includeReplaySql);
+        WriteJson(sw, events, tableName, includeUndoSql, includeReplaySql, keyColumns);
         return sw.ToString();
     }
 

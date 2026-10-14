@@ -223,6 +223,7 @@ static async Task<int> RunAsync(string server, string database, string tableName
     }
 
     var ddlBoundaries = await DdlBoundaryReader.GetDdlBoundariesAsync(connection, tableName);
+    var keyColumns = await KeyColumnReader.GetKeyColumnsAsync(connection, tableName);
     var ddlBoundaryLsns = ddlBoundaries.Select(b => b.Lsn).ToList();
     if (ddlBoundaries.Count > 0)
     {
@@ -295,9 +296,9 @@ static async Task<int> RunAsync(string server, string database, string tableName
         void WriteTo(TextWriter writer)
         {
             if (options.ExportFormat == "csv")
-                RowEventExporter.WriteCsv(writer, toShow, schema, tableName, options.ShowUndoSql, options.ShowReplaySql);
+                RowEventExporter.WriteCsv(writer, toShow, schema, tableName, options.ShowUndoSql, options.ShowReplaySql, keyColumns);
             else
-                RowEventExporter.WriteJson(writer, toShow, tableName, options.ShowUndoSql, options.ShowReplaySql);
+                RowEventExporter.WriteJson(writer, toShow, tableName, options.ShowUndoSql, options.ShowReplaySql, keyColumns);
         }
 
         int needsReviewCount = toShow.Count(e => e.NeedsManualReview);
@@ -387,7 +388,7 @@ static async Task<int> RunAsync(string server, string database, string tableName
 
         if (options.ShowUndoSql)
         {
-            var undoSql = UndoSqlGenerator.Generate(e, tableName);
+            var undoSql = UndoSqlGenerator.Generate(e, tableName, keyColumns: keyColumns);
             if (undoSql is not null)
                 Console.WriteLine($"    UNDO: {undoSql}");
         }
