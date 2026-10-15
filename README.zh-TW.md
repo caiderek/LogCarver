@@ -35,6 +35,35 @@ SQL Server 交易記錄檔解析工具 —— 直接從交易記錄檔讀出 ins
 
 LogCarver 永遠只會**印出建議的 SQL**(`--undo`/`--replay`)—— 它不會用寫入意圖連線,也不會自己執行任何東西。請務必先審閱產生的 SQL,並在非正式環境測試過再用。本工具不保證解碼結果一定正確,尤其牽涉合規或財務用途時,請自行獨立驗證救回的資料。完整免責聲明見 [LICENSE](LICENSE)(MIT 授權)。
 
+## 快速開始(複製貼上就能用)
+
+LogCarver 是命令列程式。直接雙擊 `LogCarver.exe` 只會印出用法說明然後關掉視窗,所以請從命令提示字元執行:
+
+1. 到[最新版 release](https://github.com/caiderek/LogCarver/releases/latest)下載 `LogCarver.exe`,放進一個資料夾,例如 `C:\LogCarver`。
+2. 按 `Win + R`,輸入 `cmd`,按 Enter。
+3. 切到那個資料夾:
+
+   ```
+   cd /d C:\LogCarver
+   ```
+
+4. 貼上這一行,再把值換成你自己的(對照下表):
+
+   ```
+   LogCarver.exe 192.168.1.10 MyDatabase dbo.Orders --user myuser --password "mypassword" --from "2026-09-23T09:00" --to "2026-09-23T10:00" --export csv --output orders.csv
+   ```
+
+| 部分 | 換成 |
+|---|---|
+| `192.168.1.10` | 伺服器的主機名稱或 IP。具名執行個體寫 `host\instance`;非預設連接埠寫 `host,1433`。 |
+| `MyDatabase` | 資料表所在的資料庫。 |
+| `dbo.Orders` | 資料表,格式是 `schema.table`。 |
+| `--user myuser --password "mypassword"` | SQL 登入帳號密碼。想改用目前的 Windows 帳號,就把這兩個都拿掉。密碼會留在你的命令列歷史裡,能用 Windows 驗證就盡量用。 |
+| `--from` / `--to` | 你要查的時間範圍。兩個都不給,就是看記錄檔裡還留著的全部。 |
+| `--export csv --output orders.csv` | 把結果寫進目前資料夾的 `orders.csv`。兩個都不給,就直接印在畫面上。 |
+
+這個登入帳號要有讀取交易記錄檔的權限(`fn_dblog` 通常需要 `sysadmin`)。如果顯示 `0 row event(s)`,請看下面的[為什麼會看到「0 row event(s)」?](#為什麼會看到0-row-events)。
+
 ## 使用方式
 
 ```

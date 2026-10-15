@@ -35,6 +35,35 @@ Grab the latest self-contained `LogCarver.exe` from the [Releases page](https://
 
 LogCarver only ever **prints suggested SQL** (for `--undo`/`--replay`) — it never connects with write intent or executes anything itself. Always review generated SQL and test it against a non-production copy first. This tool is provided with no warranty of correctness; verify recovered data independently before relying on it, especially for anything compliance- or finance-sensitive. See [LICENSE](LICENSE) for the full MIT disclaimer.
 
+## Quick start (copy and paste)
+
+LogCarver is a command-line program. Double-clicking `LogCarver.exe` only prints the usage text and closes the window, so run it from a Command Prompt:
+
+1. Download `LogCarver.exe` from the [latest release](https://github.com/caiderek/LogCarver/releases/latest) and put it in a folder, for example `C:\LogCarver`.
+2. Press `Win + R`, type `cmd`, press Enter.
+3. Go to the folder:
+
+   ```
+   cd /d C:\LogCarver
+   ```
+
+4. Paste this, then change the values (see the table below):
+
+   ```
+   LogCarver.exe 192.168.1.10 MyDatabase dbo.Orders --user myuser --password "mypassword" --from "2026-09-23T09:00" --to "2026-09-23T10:00" --export csv --output orders.csv
+   ```
+
+| Part | Replace with |
+|---|---|
+| `192.168.1.10` | The server's hostname or IP. A named instance is `host\instance`; a non-default port is `host,1433`. |
+| `MyDatabase` | The database the table lives in. |
+| `dbo.Orders` | The table, as `schema.table`. |
+| `--user myuser --password "mypassword"` | A SQL login. To use your current Windows account instead, leave both out. The password stays in your shell history, so prefer Windows authentication where you can. |
+| `--from` / `--to` | The time window you want to look at. Leave both out to see everything still in the log. |
+| `--export csv --output orders.csv` | Writes the result to `orders.csv` in the current folder. Leave both out to print it on screen. |
+
+The login needs the right to read the transaction log (`fn_dblog` normally needs `sysadmin`). If it reports `0 row event(s)`, see [Why do I see "0 row event(s)"?](#why-do-i-see-0-row-events) below.
+
 ## Usage
 
 ```
