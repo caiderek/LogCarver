@@ -50,8 +50,10 @@ LogCarver 是命令列程式。直接雙擊 `LogCarver.exe` 只會印出用法�
 4. 貼上這一行,再把值換成你自己的(對照下表):
 
    ```
-   LogCarver.exe 192.168.1.10 MyDatabase dbo.Orders --user myuser --password "mypassword" --from "2026-09-23T09:00" --to "2026-09-23T10:00" --export csv --output orders.csv
+   LogCarver.exe 192.168.1.10 MyDatabase dbo.Orders --user myuser --password "mypassword" --from "2026-09-23T09:00" --to "2026-09-23T10:00" --undo --export sql --output undo.sql
    ```
+
+5. 用 SQL Server Management Studio 開啟 `undo.sql`,逐句看過再執行。LogCarver 不會替你執行,而且某一列之後如果又被改過,對應的語句會對不上而什麼都不做。
 
 | 部分 | 換成 |
 |---|---|
@@ -60,14 +62,14 @@ LogCarver 是命令列程式。直接雙擊 `LogCarver.exe` 只會印出用法�
 | `dbo.Orders` | 資料表,格式是 `schema.table`。 |
 | `--user myuser --password "mypassword"` | SQL 登入帳號密碼。想改用目前的 Windows 帳號,就把這兩個都拿掉。密碼會留在你的命令列歷史裡,能用 Windows 驗證就盡量用。 |
 | `--from` / `--to` | 你要查的時間範圍。兩個都不給,就是看記錄檔裡還留著的全部。 |
-| `--export csv --output orders.csv` | 把結果寫進目前資料夾的 `orders.csv`。兩個都不給,就直接印在畫面上。 |
+| `--undo --export sql --output undo.sql` | 把「還原這些變更」的語句寫進目前資料夾的 `undo.sql`。如果只想要給試算表看的事件清單,改用 `--export csv --output orders.csv`。 |
 
 這個登入帳號要有讀取交易記錄檔的權限(`fn_dblog` 通常需要 `sysadmin`)。如果顯示 `0 row event(s)`,請看下面的[為什麼會看到「0 row event(s)」?](#為什麼會看到0-row-events)。
 
 ## 使用方式
 
 ```
-LogCarver.exe <server> <database> <schema.table> [--from <datetime>] [--to <datetime>] [--key <Column>=<Value>] [--undo] [--replay] [--snapshot <datetime>] [--user <name> --password <pw>] [--timeout <seconds>] [--export csv|json [--output <path>]]
+LogCarver.exe <server> <database> <schema.table> [--from <datetime>] [--to <datetime>] [--key <Column>=<Value>] [--undo] [--replay] [--snapshot <datetime>] [--user <name> --password <pw>] [--timeout <seconds>] [--export csv|json|sql [--output <path>]]
 ```
 
 | 旗標 | 效果 |
@@ -79,7 +81,7 @@ LogCarver.exe <server> <database> <schema.table> [--from <datetime>] [--to <date
 | `--snapshot <datetime>` | 重建那個確切時間點每一列的樣子,而不是列出事件清單。會忽略 `--from`/`--to`/`--key`/`--undo`/`--replay`。 |
 | `--user <name>` / `--password <pw>` | 改用 SQL 帳號密碼登入,不用目前的 Windows 帳號。兩個要嘛一起給、要嘛都不給。密碼在執行期間會出現在你的 shell 紀錄跟這個行程的命令列裡 —— 能用 Windows 驗證就盡量用。 |
 | `--timeout <seconds>` | 調高每次掃描記錄檔查詢的時間上限(預設 120 秒,`0` 表示不限制)。使用中的記錄檔很大時需要,因為每次執行會把整份記錄檔讀超過一次;建議在離峰時段跑。 |
-| `--export csv\|json` / `--output <path>` | 把事件清單輸出成結構化的 csv 或 json,不用主控台的列表格式:每個觀察到的資料表欄位各一欄(`Before_<Col>` / `After_<Col>`),不會把前後值擠進同一格。不適用於 `--snapshot`。`--output` 會寫進指定檔案而不是標準輸出,而且必須搭配 `--export`。 |
+| `--export csv\|json\|sql` / `--output <path>` | 把結果輸出成檔案(或標準輸出),不用主控台的列表格式。`csv` 和 `json`:每個觀察到的資料表欄位各一欄(`Before_<Col>` / `After_<Col>`),不會把前後值擠進同一格。`sql`:一份可以直接執行的 `.sql` 腳本,內容是 `--undo` 的還原語句(由新到舊),或 `--replay` 的重播語句(由舊到新);兩個只能擇一。檔案是 UTF-8 含 BOM,SSMS 才會正確讀到中文。不適用於 `--snapshot`。`--output` 會寫進指定檔案而不是標準輸出,而且必須搭配 `--export`。 |
 
 範例:
 
@@ -90,6 +92,7 @@ LogCarver.exe localhost MyDatabase dbo.Orders --key Id=5 --undo
 LogCarver.exe localhost MyDatabase dbo.Orders --snapshot "2026-09-23T09:30"
 LogCarver.exe localhost MyDatabase dbo.Orders --user sa --password "..."
 LogCarver.exe localhost MyDatabase dbo.Orders --export csv --output orders.csv
+LogCarver.exe localhost MyDatabase dbo.Orders --from "2026-09-23T09:00" --to "2026-09-23T10:00" --undo --export sql --output undo.sql
 ```
 
 **記錄檔很大的情況。** 每次執行都會把整份使用中的記錄檔(`fn_dblog`)讀超過一次。FULL 復原模式的資料庫如果一直沒有做記錄檔備份,記錄檔就不會被截斷,可能留著好幾個月的歷史,單次掃描就要好幾分鐘。如果執行到一半出現逾時訊息,用 `--timeout` 調高上限,並在離峰時段跑。

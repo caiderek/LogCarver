@@ -148,9 +148,9 @@ static bool TryParseOptions(string[] args, out CliOptions options, out string er
                 break;
 
             case "--export":
-                if (value is not ("csv" or "json"))
+                if (value is not ("csv" or "json" or "sql"))
                 {
-                    error = $"Could not parse --export value '{value}'. Expected 'csv' or 'json'.";
+                    error = $"Could not parse --export value '{value}'. Expected 'csv', 'json' or 'sql'.";
                     return false;
                 }
                 options.ExportFormat = value;
@@ -173,7 +173,12 @@ static bool TryParseOptions(string[] args, out CliOptions options, out string er
     }
     if (options.OutputPath is not null && options.ExportFormat is null)
     {
-        error = "--output requires --export csv or --export json.";
+        error = "--output requires --export csv, --export json or --export sql.";
+        return false;
+    }
+    if (options.ExportFormat == "sql" && options.ShowUndoSql == options.ShowReplaySql)
+    {
+        error = "--export sql needs exactly one of --undo or --replay (they put the statements in opposite orders).";
         return false;
     }
     return true;
@@ -181,7 +186,7 @@ static bool TryParseOptions(string[] args, out CliOptions options, out string er
 
 static void PrintUsage()
 {
-    Console.WriteLine("Usage: LogCarver.Cli <server> <database> <schema.table> [--from <datetime>] [--to <datetime>] [--key <Column>=<Value>] [--undo] [--replay] [--snapshot <datetime>] [--user <name> --password <pw>] [--timeout <seconds>] [--export csv|json [--output <path>]]");
+    Console.WriteLine("Usage: LogCarver.Cli <server> <database> <schema.table> [--from <datetime>] [--to <datetime>] [--key <Column>=<Value>] [--undo] [--replay] [--snapshot <datetime>] [--user <name> --password <pw>] [--timeout <seconds>] [--export csv|json|sql [--output <path>]]");
     Console.WriteLine("Example: LogCarver.Cli localhost MyDatabase dbo.Orders");
     Console.WriteLine("Example: LogCarver.Cli localhost MyDatabase dbo.Orders --from \"2026-09-23T09:00\" --to \"2026-09-23T10:00\"");
     Console.WriteLine("Example: LogCarver.Cli localhost MyDatabase dbo.Orders --key Id=5   (only this row's full history)");
@@ -209,6 +214,9 @@ static void PrintUsage()
     Console.WriteLine("--export writes structured csv/json instead of the normal console listing - one column per");
     Console.WriteLine("observed table column (Before_<Col>/After_<Col>), not a single flattened cell. Applies to");
     Console.WriteLine("the event listing only, not --snapshot. --output writes to that file instead of stdout.");
+    Console.WriteLine("--export sql writes a .sql script instead: with --undo the statements run newest event first,");
+    Console.WriteLine("with --replay oldest first. Give exactly one of them. The file is UTF-8 with a BOM so SSMS");
+    Console.WriteLine("reads non-ASCII text correctly. Review it before running; LogCarver never executes anything.");
     Console.WriteLine();
     Console.WriteLine("No data ever leaves this machine.");
 }
@@ -246,6 +254,10 @@ static async Task<int> RunAsync(string server, string database, string tableName
 
     var ddlBoundaries = await DdlBoundaryReader.GetDdlBoundariesAsync(connection, tableName);
     var keyColumns = await KeyColumnReader.GetKeyColumnsAsync(connection, tableName);
+    // An undo that puts a deleted row back must restore its original identity
+    // value (SET IDENTITY_INSERT), and an UPDATE's undo must never SET the
+    // identity column - both need to know which column it is.
+    string? identityColumn = schema.FirstOrDefault(c => c.IsIdentity)?.Name;
     var ddlBoundaryLsns = ddlBoundaries.Select(b => b.Lsn).ToList();
     if (ddlBoundaries.Count > 0)
     {
@@ -315,12 +327,15 @@ static async Task<int> RunAsync(string server, string database, string tableName
         // path - streaming loses the old buffer-everything approach's
         // free "nothing written until it all succeeded" property, so this
         // gets it back explicitly instead.
+        int sqlStatements = 0;
         void WriteTo(TextWriter writer)
         {
             if (options.ExportFormat == "csv")
-                RowEventExporter.WriteCsv(writer, toShow, schema, tableName, options.ShowUndoSql, options.ShowReplaySql, keyColumns);
+                RowEventExporter.WriteCsv(writer, toShow, schema, tableName, options.ShowUndoSql, options.ShowReplaySql, keyColumns, identityColumn);
+            else if (options.ExportFormat == "sql")
+                sqlStatements = RowEventExporter.WriteSqlScript(writer, toShow, tableName, undo: options.ShowUndoSql, keyColumns, identityColumn);
             else
-                RowEventExporter.WriteJson(writer, toShow, tableName, options.ShowUndoSql, options.ShowReplaySql, keyColumns);
+                RowEventExporter.WriteJson(writer, toShow, tableName, options.ShowUndoSql, options.ShowReplaySql, keyColumns, identityColumn);
         }
 
         int needsReviewCount = toShow.Count(e => e.NeedsManualReview);
@@ -331,8 +346,18 @@ static async Task<int> RunAsync(string server, string database, string tableName
 
         if (options.OutputPath is not null)
         {
-            RowEventExporter.WriteFileAtomically<object?>(options.OutputPath, writer => { WriteTo(writer); return null; });
-            Console.WriteLine($"Wrote {toShow.Count} row event(s) for {tableName} to {options.OutputPath}.");
+            // A .sql file gets a UTF-8 BOM: without one SSMS opens it in the
+            // system ANSI code page and garbles non-ASCII (e.g. Chinese) text.
+            System.Text.Encoding? fileEncoding = options.ExportFormat == "sql" ? new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: true) : null;
+            RowEventExporter.WriteFileAtomically<object?>(options.OutputPath, writer => { WriteTo(writer); return null; }, fileEncoding);
+            if (options.ExportFormat == "sql")
+            {
+                Console.WriteLine($"Wrote {sqlStatements} {(options.ShowUndoSql ? "undo" : "replay")} statement(s) for {tableName} to {options.OutputPath}.");
+                if (sqlStatements == 0)
+                    Console.WriteLine("No statement could be produced from the events shown - the file holds only the header.");
+            }
+            else
+                Console.WriteLine($"Wrote {toShow.Count} row event(s) for {tableName} to {options.OutputPath}.");
             if (reviewSummary is not null) Console.WriteLine(reviewSummary);
         }
         else
@@ -423,14 +448,14 @@ static async Task<int> RunAsync(string server, string database, string tableName
 
         if (options.ShowUndoSql)
         {
-            var undoSql = UndoSqlGenerator.Generate(e, tableName, keyColumns: keyColumns);
+            var undoSql = UndoSqlGenerator.Generate(e, tableName, identityColumn, keyColumns);
             if (undoSql is not null)
                 Console.WriteLine($"    UNDO: {undoSql}");
         }
 
         if (options.ShowReplaySql)
         {
-            var replaySql = ReplaySqlGenerator.Generate(e, tableName);
+            var replaySql = ReplaySqlGenerator.Generate(e, tableName, identityColumn);
             if (replaySql is not null)
                 Console.WriteLine($"    REPLAY: {replaySql}");
         }

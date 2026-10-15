@@ -50,8 +50,10 @@ LogCarver is a command-line program. Double-clicking `LogCarver.exe` only prints
 4. Paste this, then change the values (see the table below):
 
    ```
-   LogCarver.exe 192.168.1.10 MyDatabase dbo.Orders --user myuser --password "mypassword" --from "2026-09-23T09:00" --to "2026-09-23T10:00" --export csv --output orders.csv
+   LogCarver.exe 192.168.1.10 MyDatabase dbo.Orders --user myuser --password "mypassword" --from "2026-09-23T09:00" --to "2026-09-23T10:00" --undo --export sql --output undo.sql
    ```
+
+5. Open `undo.sql` in SQL Server Management Studio, read every statement, then run it. LogCarver never runs it for you, and a statement whose row has changed since matches nothing and does nothing.
 
 | Part | Replace with |
 |---|---|
@@ -60,14 +62,14 @@ LogCarver is a command-line program. Double-clicking `LogCarver.exe` only prints
 | `dbo.Orders` | The table, as `schema.table`. |
 | `--user myuser --password "mypassword"` | A SQL login. To use your current Windows account instead, leave both out. The password stays in your shell history, so prefer Windows authentication where you can. |
 | `--from` / `--to` | The time window you want to look at. Leave both out to see everything still in the log. |
-| `--export csv --output orders.csv` | Writes the result to `orders.csv` in the current folder. Leave both out to print it on screen. |
+| `--undo --export sql --output undo.sql` | Writes the statements that would undo those changes to `undo.sql` in the current folder. For a spreadsheet-friendly list of the events instead, use `--export csv --output orders.csv`. |
 
 The login needs the right to read the transaction log (`fn_dblog` normally needs `sysadmin`). If it reports `0 row event(s)`, see [Why do I see "0 row event(s)"?](#why-do-i-see-0-row-events) below.
 
 ## Usage
 
 ```
-LogCarver.exe <server> <database> <schema.table> [--from <datetime>] [--to <datetime>] [--key <Column>=<Value>] [--undo] [--replay] [--snapshot <datetime>] [--user <name> --password <pw>] [--timeout <seconds>] [--export csv|json [--output <path>]]
+LogCarver.exe <server> <database> <schema.table> [--from <datetime>] [--to <datetime>] [--key <Column>=<Value>] [--undo] [--replay] [--snapshot <datetime>] [--user <name> --password <pw>] [--timeout <seconds>] [--export csv|json|sql [--output <path>]]
 ```
 
 | Flag | Effect |
@@ -79,7 +81,7 @@ LogCarver.exe <server> <database> <schema.table> [--from <datetime>] [--to <date
 | `--snapshot <datetime>` | Reconstruct what every row looked like at that exact moment, instead of listing events. Ignores `--from`/`--to`/`--key`/`--undo`/`--replay`. |
 | `--user <name>` / `--password <pw>` | Connect with SQL authentication instead of the current Windows account. Both or neither must be given. The password is visible in your shell history and this process's command line while it runs — prefer Windows authentication where you can. |
 | `--timeout <seconds>` | Raise the time limit for each log-scanning query (default 120 seconds, `0` = no limit). Needed when the active log is large, because each run reads the whole log more than once; run it off-peak. |
-| `--export csv\|json` / `--output <path>` | Write the event listing as structured csv or json instead of the console listing: one column per observed table column (`Before_<Col>` / `After_<Col>`), not a single flattened cell. Does not apply to `--snapshot`. `--output` writes to that file instead of stdout and requires `--export`. |
+| `--export csv\|json\|sql` / `--output <path>` | Write the result as a file (or to stdout) instead of the console listing. `csv` and `json`: one column per observed table column (`Before_<Col>` / `After_<Col>`), not a single flattened cell. `sql`: a runnable `.sql` script of the `--undo` statements (newest event first) or the `--replay` statements (oldest event first); give exactly one of the two. The file is UTF-8 with a BOM so SSMS reads non-ASCII text correctly. Does not apply to `--snapshot`. `--output` writes to that file instead of stdout and requires `--export`. |
 
 Examples:
 
@@ -90,6 +92,7 @@ LogCarver.exe localhost MyDatabase dbo.Orders --key Id=5 --undo
 LogCarver.exe localhost MyDatabase dbo.Orders --snapshot "2026-09-23T09:30"
 LogCarver.exe localhost MyDatabase dbo.Orders --user sa --password "..."
 LogCarver.exe localhost MyDatabase dbo.Orders --export csv --output orders.csv
+LogCarver.exe localhost MyDatabase dbo.Orders --from "2026-09-23T09:00" --to "2026-09-23T10:00" --undo --export sql --output undo.sql
 ```
 
 **Large logs.** Each run reads the whole active log (`fn_dblog`) more than once. A database in FULL recovery that never takes log backups never truncates its log, so the log can hold months of history and a single scan can take minutes. If a run stops with a timeout message, raise the limit with `--timeout` and run it off-peak.
