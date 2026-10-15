@@ -38,7 +38,7 @@ LogCarver only ever **prints suggested SQL** (for `--undo`/`--replay`) — it ne
 ## Usage
 
 ```
-LogCarver.exe <server> <database> <schema.table> [--from <datetime>] [--to <datetime>] [--key <Column>=<Value>] [--undo] [--replay] [--snapshot <datetime>] [--user <name> --password <pw>] [--timeout <seconds>]
+LogCarver.exe <server> <database> <schema.table> [--from <datetime>] [--to <datetime>] [--key <Column>=<Value>] [--undo] [--replay] [--snapshot <datetime>] [--user <name> --password <pw>] [--timeout <seconds>] [--export csv|json [--output <path>]]
 ```
 
 | Flag | Effect |
@@ -50,6 +50,7 @@ LogCarver.exe <server> <database> <schema.table> [--from <datetime>] [--to <date
 | `--snapshot <datetime>` | Reconstruct what every row looked like at that exact moment, instead of listing events. Ignores `--from`/`--to`/`--key`/`--undo`/`--replay`. |
 | `--user <name>` / `--password <pw>` | Connect with SQL authentication instead of the current Windows account. Both or neither must be given. The password is visible in your shell history and this process's command line while it runs — prefer Windows authentication where you can. |
 | `--timeout <seconds>` | Raise the time limit for each log-scanning query (default 120 seconds, `0` = no limit). Needed when the active log is large, because each run reads the whole log more than once; run it off-peak. |
+| `--export csv\|json` / `--output <path>` | Write the event listing as structured csv or json instead of the console listing: one column per observed table column (`Before_<Col>` / `After_<Col>`), not a single flattened cell. Does not apply to `--snapshot`. `--output` writes to that file instead of stdout and requires `--export`. |
 
 Examples:
 
@@ -59,6 +60,7 @@ LogCarver.exe localhost MyDatabase dbo.Orders --from "2026-09-23T09:00" --to "20
 LogCarver.exe localhost MyDatabase dbo.Orders --key Id=5 --undo
 LogCarver.exe localhost MyDatabase dbo.Orders --snapshot "2026-09-23T09:30"
 LogCarver.exe localhost MyDatabase dbo.Orders --user sa --password "..."
+LogCarver.exe localhost MyDatabase dbo.Orders --export csv --output orders.csv
 ```
 
 **Large logs.** Each run reads the whole active log (`fn_dblog`) more than once. A database in FULL recovery that never takes log backups never truncates its log, so the log can hold months of history and a single scan can take minutes. If a run stops with a timeout message, raise the limit with `--timeout` and run it off-peak.
