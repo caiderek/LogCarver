@@ -64,7 +64,7 @@ public static class TransactionScopeReader
         await using var command = new SqlCommand(Sql, connection);
         // Same reasoning as FnDblogReader's CommandTimeout bump - this is
         // also a fn_dblog scan, unbounded unless beginLsn/commitLsn are given.
-        command.CommandTimeout = 120;
+        command.CommandTimeout = LogScanSettings.CommandTimeoutSeconds;
         command.Parameters.AddWithValue("@transactionId", transactionId);
         command.Parameters.AddWithValue("@beginLsn", (object?)beginLsn ?? DBNull.Value);
         command.Parameters.AddWithValue("@commitLsn", (object?)commitLsn ?? DBNull.Value);

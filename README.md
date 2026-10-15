@@ -38,7 +38,7 @@ LogCarver only ever **prints suggested SQL** (for `--undo`/`--replay`) — it ne
 ## Usage
 
 ```
-LogCarver.exe <server> <database> <schema.table> [--from <datetime>] [--to <datetime>] [--key <Column>=<Value>] [--undo] [--replay] [--snapshot <datetime>] [--user <name> --password <pw>]
+LogCarver.exe <server> <database> <schema.table> [--from <datetime>] [--to <datetime>] [--key <Column>=<Value>] [--undo] [--replay] [--snapshot <datetime>] [--user <name> --password <pw>] [--timeout <seconds>]
 ```
 
 | Flag | Effect |
@@ -49,6 +49,7 @@ LogCarver.exe <server> <database> <schema.table> [--from <datetime>] [--to <date
 | `--replay` | Print a suggested SQL statement reproducing each shown event forward. Same safe-`WHERE` behavior as `--undo`. |
 | `--snapshot <datetime>` | Reconstruct what every row looked like at that exact moment, instead of listing events. Ignores `--from`/`--to`/`--key`/`--undo`/`--replay`. |
 | `--user <name>` / `--password <pw>` | Connect with SQL authentication instead of the current Windows account. Both or neither must be given. The password is visible in your shell history and this process's command line while it runs — prefer Windows authentication where you can. |
+| `--timeout <seconds>` | Raise the time limit for each log-scanning query (default 120 seconds, `0` = no limit). Needed when the active log is large, because each run reads the whole log more than once; run it off-peak. |
 
 Examples:
 
@@ -59,6 +60,8 @@ LogCarver.exe localhost MyDatabase dbo.Orders --key Id=5 --undo
 LogCarver.exe localhost MyDatabase dbo.Orders --snapshot "2026-09-23T09:30"
 LogCarver.exe localhost MyDatabase dbo.Orders --user sa --password "..."
 ```
+
+**Large logs.** Each run reads the whole active log (`fn_dblog`) more than once. A database in FULL recovery that never takes log backups never truncates its log, so the log can hold months of history and a single scan can take minutes. If a run stops with a timeout message, raise the limit with `--timeout` and run it off-peak.
 
 ## Why do I see "0 row event(s)"?
 
@@ -71,6 +74,8 @@ If you just changed data and LogCarver reports zero events for that table, this 
 Concretely: a table in a SIMPLE-recovery database gets a row deleted, then LogCarver is run against it moments later and reports `0 row event(s)`. That's expected — by the time the tool ran, the checkpoint had already marked the relevant VLF reusable, and `fn_dblog` had already forgotten the delete *and* the insert that came before it.
 
 The important nuance: "marked reusable" is not the same as "physically overwritten." The bytes may still be sitting untouched in the `.ldf` file — SQL Server just isn't telling you about them anymore. That gap between what `fn_dblog` reports and what's still physically recoverable is exactly what **LogCarverOffline** (below) is built to close.
+
+**What LogCarver prints when it finds nothing.** The CLI reads a few facts from the server and prints them: the database's recovery model and log reuse wait, the time span the online log covers, whether the login is sysadmin, and which tables still have deleted rows in the log. It then names the most likely reason, for example that the log starts after the `--from` time you gave, or that the database is in SIMPLE recovery. Treat this as a hint, not proof: some causes can look the same from `fn_dblog`'s side, such as a wrong table name and a log that has already been reused.
 
 ## Offline recovery
 

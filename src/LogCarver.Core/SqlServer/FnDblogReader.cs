@@ -141,7 +141,7 @@ public static class FnDblogReader
         // doc comment) shrinks the scanned range in the first place, so
         // this timeout is now a backstop for the unbounded/legacy case,
         // not the expected normal cost.
-        command.CommandTimeout = 120;
+        command.CommandTimeout = LogScanSettings.CommandTimeoutSeconds;
         command.Parameters.AddWithValue("@allocUnitName", allocUnitName);
         command.Parameters.AddWithValue("@commitLsn", (object?)commitLsn ?? DBNull.Value);
 

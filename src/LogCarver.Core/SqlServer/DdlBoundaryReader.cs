@@ -92,7 +92,7 @@ public static class DdlBoundaryReader
             // Same reasoning as FnDblogReader's CommandTimeout bump - this
             // query does two fn_dblog scans per hobt_id, unbounded unless
             // commitLsn is given.
-            command.CommandTimeout = 120;
+            command.CommandTimeout = LogScanSettings.CommandTimeoutSeconds;
             command.Parameters.AddWithValue("@rowsetPattern", $"%rowset {hobtId}.%");
             command.Parameters.AddWithValue("@commitLsn", (object?)commitLsn ?? DBNull.Value);
 

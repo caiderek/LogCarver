@@ -31,7 +31,7 @@ public static class TransactionTimeReader
         var results = new Dictionary<string, DateTime>();
         await using var command = new SqlCommand(Sql, connection);
         // Full fn_dblog(NULL, NULL) scan, same as FnDblogReader and DdlBoundaryReader: the 30s default can time out on a large log.
-        command.CommandTimeout = 120;
+        command.CommandTimeout = LogScanSettings.CommandTimeoutSeconds;
         await using var reader = await command.ExecuteReaderAsync(ct);
         int ordId = reader.GetOrdinal("TxId");
         int ordTime = reader.GetOrdinal("BeginTime");

@@ -38,7 +38,7 @@ LogCarver 永遠只會**印出建議的 SQL**(`--undo`/`--replay`)—— 它不�
 ## 使用方式
 
 ```
-LogCarver.exe <server> <database> <schema.table> [--from <datetime>] [--to <datetime>] [--key <Column>=<Value>] [--undo] [--replay] [--snapshot <datetime>] [--user <name> --password <pw>]
+LogCarver.exe <server> <database> <schema.table> [--from <datetime>] [--to <datetime>] [--key <Column>=<Value>] [--undo] [--replay] [--snapshot <datetime>] [--user <name> --password <pw>] [--timeout <seconds>]
 ```
 
 | 旗標 | 效果 |
@@ -49,6 +49,7 @@ LogCarver.exe <server> <database> <schema.table> [--from <datetime>] [--to <date
 | `--replay` | 印出「正向重現」該事件的建議 SQL。跟 `--undo` 一樣有安全的 `WHERE` 子句。 |
 | `--snapshot <datetime>` | 重建那個確切時間點每一列的樣子,而不是列出事件清單。會忽略 `--from`/`--to`/`--key`/`--undo`/`--replay`。 |
 | `--user <name>` / `--password <pw>` | 改用 SQL 帳號密碼登入,不用目前的 Windows 帳號。兩個要嘛一起給、要嘛都不給。密碼在執行期間會出現在你的 shell 紀錄跟這個行程的命令列裡 —— 能用 Windows 驗證就盡量用。 |
+| `--timeout <seconds>` | 調高每次掃描記錄檔查詢的時間上限(預設 120 秒,`0` 表示不限制)。使用中的記錄檔很大時需要,因為每次執行會把整份記錄檔讀超過一次;建議在離峰時段跑。 |
 
 範例:
 
@@ -59,6 +60,8 @@ LogCarver.exe localhost MyDatabase dbo.Orders --key Id=5 --undo
 LogCarver.exe localhost MyDatabase dbo.Orders --snapshot "2026-09-23T09:30"
 LogCarver.exe localhost MyDatabase dbo.Orders --user sa --password "..."
 ```
+
+**記錄檔很大的情況。** 每次執行都會把整份使用中的記錄檔(`fn_dblog`)讀超過一次。FULL 復原模式的資料庫如果一直沒有做記錄檔備份,記錄檔就不會被截斷,可能留著好幾個月的歷史,單次掃描就要好幾分鐘。如果執行到一半出現逾時訊息,用 `--timeout` 調高上限,並在離峰時段跑。
 
 ## 為什麼會看到「0 row event(s)」?
 
@@ -71,6 +74,8 @@ LogCarver.exe localhost MyDatabase dbo.Orders --user sa --password "..."
 實際測試就遇過這種狀況:SIMPLE 復原模式的資料庫刪掉一筆資料,沒過多久拿 LogCarver 去查,結果是 `0 row event(s)`。原因很單純 —— checkpoint 早一步把相關 VLF 標成可重用,`fn_dblog` 連那筆刪除、跟更早的那筆新增,一起忘光了。
 
 重點是:「標記成可重用」跟「已經被實體覆寫」是兩件事。位元組很可能還原封不動躺在 `.ldf` 檔案裡,只是 SQL Server 不讓你看到而已。`fn_dblog` 看得到的範圍,跟實際上還救得回來的範圍,中間的落差就是下面 **LogCarverOffline** 要補的地方。
+
+**查不到事件時,LogCarver 會印什麼。** CLI 會從伺服器讀幾項資訊一併印出:資料庫的復原模式與記錄檔重用等待原因、線上記錄檔涵蓋的時間範圍、登入帳號是不是 sysadmin、以及記錄檔裡還有哪些資料表留著刪除的資料列。接著指出最可能的原因,例如記錄檔的起點晚於你給的 `--from` 時間,或資料庫是 SIMPLE 復原模式。這只是提示,不是證明:有些原因從 `fn_dblog` 這一端看起來是一樣的,例如資料表名稱打錯,和記錄檔已經被重用。
 
 ## 離線救援
 

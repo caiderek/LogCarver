@@ -31,9 +31,20 @@ if (!TryParseOptions(args, out var options, out var parseError))
     return 1;
 }
 
+if (options.TimeoutSeconds is { } timeoutSeconds)
+    LogScanSettings.CommandTimeoutSeconds = timeoutSeconds;
+
 try
 {
     return await RunAsync(server, database, tableName, options);
+}
+catch (SqlException ex) when (ex.Number == -2)
+{
+    // -2 is SqlClient's own "timeout expired": the login worked, a query ran longer than the limit.
+    Console.WriteLine($"A query on SQL Server '{server}' ran longer than {LogScanSettings.CommandTimeoutSeconds} seconds and was stopped: {ex.Message}");
+    Console.WriteLine("The server was reachable and the login worked. This usually means the active transaction log is large, because");
+    Console.WriteLine("each run reads the whole log (fn_dblog) more than once. Try a longer limit, e.g. --timeout 1800, off-peak.");
+    return 1;
 }
 catch (SqlException ex)
 {
@@ -127,6 +138,15 @@ static bool TryParseOptions(string[] args, out CliOptions options, out string er
                 options.SqlPassword = value;
                 break;
 
+            case "--timeout":
+                if (!int.TryParse(value, out var timeoutSeconds) || timeoutSeconds < 0)
+                {
+                    error = $"Could not parse --timeout value '{value}'. Expected whole seconds, e.g. --timeout 900 (0 = no limit).";
+                    return false;
+                }
+                options.TimeoutSeconds = timeoutSeconds;
+                break;
+
             case "--export":
                 if (value is not ("csv" or "json"))
                 {
@@ -161,7 +181,7 @@ static bool TryParseOptions(string[] args, out CliOptions options, out string er
 
 static void PrintUsage()
 {
-    Console.WriteLine("Usage: LogCarver.Cli <server> <database> <schema.table> [--from <datetime>] [--to <datetime>] [--key <Column>=<Value>] [--undo] [--replay] [--snapshot <datetime>] [--user <name> --password <pw>] [--export csv|json [--output <path>]]");
+    Console.WriteLine("Usage: LogCarver.Cli <server> <database> <schema.table> [--from <datetime>] [--to <datetime>] [--key <Column>=<Value>] [--undo] [--replay] [--snapshot <datetime>] [--user <name> --password <pw>] [--timeout <seconds>] [--export csv|json [--output <path>]]");
     Console.WriteLine("Example: LogCarver.Cli localhost MyDatabase dbo.Orders");
     Console.WriteLine("Example: LogCarver.Cli localhost MyDatabase dbo.Orders --from \"2026-09-23T09:00\" --to \"2026-09-23T10:00\"");
     Console.WriteLine("Example: LogCarver.Cli localhost MyDatabase dbo.Orders --key Id=5   (only this row's full history)");
@@ -184,6 +204,8 @@ static void PrintUsage()
     Console.WriteLine("--user/--password connect with SQL authentication instead of the current Windows account -");
     Console.WriteLine("both or neither must be given. The password is visible in your shell history and this");
     Console.WriteLine("process's command line while it runs; prefer Windows authentication where you can.");
+    Console.WriteLine("--timeout <seconds> raises the limit for each log-scanning query (default 120, 0 = no limit). Needed when");
+    Console.WriteLine("the active log is large: each run reads the whole log more than once, so use it off-peak.");
     Console.WriteLine("--export writes structured csv/json instead of the normal console listing - one column per");
     Console.WriteLine("observed table column (Before_<Col>/After_<Col>), not a single flattened cell. Applies to");
     Console.WriteLine("the event listing only, not --snapshot. --output writes to that file instead of stdout.");
@@ -348,8 +370,21 @@ static async Task<int> RunAsync(string server, string database, string tableName
     if (history.Count == 0)
     {
         Console.WriteLine();
-        Console.WriteLine("fn_dblog found nothing for this table. This usually means the relevant VLF has already");
-        Console.WriteLine("been marked reusable and rotated past - the data may still be physically present in the");
+        DateTime? logOldest = transactionTimes.Count > 0 ? transactionTimes.Values.Min() : null;
+        DateTime? logNewest = transactionTimes.Count > 0 ? transactionTimes.Values.Max() : null;
+        try
+        {
+            var overview = await NoEventsDiagnosis.ReadOverviewAsync(connection);
+            foreach (var line in NoEventsDiagnosis.Explain(overview, tableName, logOldest, logNewest, options.From))
+                Console.WriteLine(line);
+        }
+        catch (SqlException ex)
+        {
+            // The explanation is a courtesy; never turn a clean "0 rows" into a crash.
+            Console.WriteLine($"No row events for {tableName} were found. (Could not read the log overview: {ex.Message})");
+        }
+        Console.WriteLine();
+        Console.WriteLine("If the log really has rotated past the delete, the data may still be physically present in the");
         Console.WriteLine(".ldf file even though SQL Server itself can no longer report it. LogCarverOffline reads");
         Console.WriteLine("the raw .ldf bytes directly and can often recover exactly this case.");
         Console.WriteLine($"Free trial (no license, first 10 events): {OfflineTrialUrl}");
@@ -431,4 +466,5 @@ sealed class CliOptions
     public string? SqlPassword { get; set; }
     public string? ExportFormat { get; set; }
     public string? OutputPath { get; set; }
+    public int? TimeoutSeconds { get; set; }
 }
