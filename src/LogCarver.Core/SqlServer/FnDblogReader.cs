@@ -180,7 +180,8 @@ public static class FnDblogReader
                 RowLogContents2: reader.IsDBNull(ordRlc2) ? null : (byte[])reader[ordRlc2],
                 IsCompensation: !reader.IsDBNull(ordDescription) && reader.GetString(ordDescription) == "COMPENSATION"));
         }
-        return results;
+        // A compensation record of LOP_MODIFY_ROW carries no old bytes (see CompensationNormalizer).
+        return CompensationNormalizer.FillCompensationOldBytes(results);
     }
 
     /// <summary>
