@@ -11,7 +11,8 @@ namespace LogCarver.Core.IntegrationTests;
 /// further changes to the same row. The oracle is the database itself: after every committed step
 /// the row is read back, and the events LogCarver reconstructs must be exactly those committed
 /// steps (kind, before, after), with nothing from the rolled-back work in them. An event that is
-/// refused or flagged (Note set) is acceptable, an event that is silently wrong is not.
+/// silently wrong is the worst outcome; an event that is merely refused or flagged also fails here,
+/// because every shape in this matrix is expected to decode completely.
 ///
 /// Why this exists: the rollback handling was first tested only with hand-written log records that
 /// assumed what SQL Server writes for a rollback (2026-10-14), and the assumption was wrong -
@@ -173,8 +174,12 @@ public class RollbackMatrixTests(SqlServerFixture fixture, ITestOutputHelper out
                     problems.Add($"SILENTLY WRONG {got.Kind}: before={got.Before} after={got.After}");
             }
 
-            // And if nothing was flagged, none may be missing or extra.
-            if (flagged.Count == 0 && trusted.Count != expected.Count)
+            // Every shape in this matrix decodes completely: nothing flagged, nothing missing, nothing extra.
+            // (A shape that cannot be decoded safely would be refused rather than guessed, which is why
+            // the check above only fails on events that look trustworthy; here it must not even come to that.)
+            foreach (var f in flagged)
+                problems.Add($"flagged instead of decoded: {f.Note}");
+            if (trusted.Count != expected.Count)
                 problems.Add($"expected {expected.Count} events, got {trusted.Count}");
 
             output.WriteLine($"[{scenarioName}] expected {expected.Count} event(s); reconstructed {history.Count}: " +

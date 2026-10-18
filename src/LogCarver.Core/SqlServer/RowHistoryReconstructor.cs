@@ -118,7 +118,7 @@ public static class RowHistoryReconstructor
         // (same transaction) says where the rest went.
         var lastInsertOfTx = new Dictionary<string, string>();
         var insertEventOfKey = new Dictionary<string, int>();
-        var undoStack = new Dictionary<string, Stack<(int Event, string Operation, string PageId, int Slot)>>();
+        var undoStack = new Dictionary<string, Stack<(int Event, string Operation, string PageId, int Slot, string Key)>>();
         var cancelled = new HashSet<int>();
         // Transactions with a compensation record that is not the inverse of
         // the record it would have to undo: nothing is cancelled for it and
@@ -172,6 +172,14 @@ public static class RowHistoryReconstructor
             if (record.PageId is null || record.SlotId is null) continue;
             int eventsBefore = events.Count;
             string key = rowKeys.Resolve(record);
+            // A compensation record is about exactly the row of the record it undoes. Resolving it
+            // like a fresh record loses that: the compensation of a DELETE is an INSERT that carries
+            // no key hash, so it was tracked as a new row, and the next change of the real row found
+            // nothing to apply to (found by the rollback matrix, 2026-10-18).
+            if (record.IsCompensation && record.TransactionId is not null &&
+                undoStack.TryGetValue(record.TransactionId, out var compensationStack) &&
+                compensationStack.Count > 0 && IsInverse(compensationStack.Peek(), record))
+                key = compensationStack.Peek().Key;
             if (record.Operation is "LOP_INSERT_ROWS" or "LOP_MODIFY_ROW" or "LOP_MODIFY_COLUMNS")
                 rowKeys.Observe(record, key);
             else if (record.Operation == "LOP_DELETE_ROWS")
@@ -447,13 +455,15 @@ public static class RowHistoryReconstructor
                 record.Operation is "LOP_INSERT_ROWS" or "LOP_MODIFY_ROW" or "LOP_MODIFY_COLUMNS" or "LOP_DELETE_ROWS")
             {
                 if (!undoStack.TryGetValue(record.TransactionId, out var stack))
-                    undoStack[record.TransactionId] = stack = new Stack<(int, string, string, int)>();
+                    undoStack[record.TransactionId] = stack = new Stack<(int, string, string, int, string)>();
 
                 if (record.IsCompensation)
                 {
                     // Whatever this record produced is not reported.
                     if (events.Count > eventsBefore)
                         events.RemoveRange(eventsBefore, events.Count - eventsBefore);
+                    if (insertEventOfKey.TryGetValue(key, out var removedInsertEvent) && removedInsertEvent >= eventsBefore)
+                        insertEventOfKey.Remove(key);
 
                     // It cancels the record it undoes - which must be the
                     // latest one still standing, at the same page and slot,
@@ -471,7 +481,7 @@ public static class RowHistoryReconstructor
                 }
                 else
                 {
-                    stack.Push((events.Count > eventsBefore ? eventsBefore : -1, record.Operation, record.PageId, record.SlotId.Value));
+                    stack.Push((events.Count > eventsBefore ? eventsBefore : -1, record.Operation, record.PageId, record.SlotId.Value, key));
                 }
             }
         }
@@ -492,7 +502,7 @@ public static class RowHistoryReconstructor
         "part of this transaction was rolled back and the rollback could not be matched to the changes it undid - " +
         "this change may have been rolled back";
 
-    private static bool IsInverse((int Event, string Operation, string PageId, int Slot) original, LogRecord compensation) =>
+    private static bool IsInverse((int Event, string Operation, string PageId, int Slot, string Key) original, LogRecord compensation) =>
         original.PageId == compensation.PageId && original.Slot == compensation.SlotId &&
         (original.Operation, compensation.Operation) is
             ("LOP_INSERT_ROWS", "LOP_DELETE_ROWS") or
