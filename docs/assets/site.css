@@ -9,8 +9,9 @@
   --muted: oklch(0.46 0.012 60);
   --rule: oklch(0.87 0.02 90);
   --link: oklch(0.47 0.15 38);
-  --serif: "Source Serif 4", "Noto Serif TC", "PMingLiU", "Songti TC", serif;
-  --mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+  /* System fonts only: the page loads nothing from other sites. */
+  --serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, "Songti TC", "Noto Serif CJK TC", "PMingLiU", serif;
+  --mono: ui-monospace, "Cascadia Mono", "SF Mono", Consolas, Menlo, monospace;
 }
 @media (prefers-color-scheme: dark) {
   :root {
