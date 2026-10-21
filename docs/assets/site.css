@@ -1,0 +1,85 @@
+/*
+  LogCarver site. A reading page for technical text: warm paper, serif type, hairline rules, no gradients,
+  no shadows, no rounded corners. Colours are oklch tokens; dark mode follows the browser (no switch, no script).
+*/
+:root {
+  --paper: oklch(0.985 0.006 95);
+  --paper-2: oklch(0.955 0.01 95);
+  --ink: oklch(0.22 0.003 100);
+  --muted: oklch(0.46 0.012 60);
+  --rule: oklch(0.87 0.02 90);
+  --link: oklch(0.47 0.15 38);
+  --serif: "Source Serif 4", "Noto Serif TC", "PMingLiU", "Songti TC", serif;
+  --mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: oklch(0.19 0.006 80);
+    --paper-2: oklch(0.23 0.008 80);
+    --ink: oklch(0.92 0.01 90);
+    --muted: oklch(0.68 0.015 80);
+    --rule: oklch(0.34 0.012 80);
+    --link: oklch(0.74 0.12 45);
+  }
+}
+
+* { box-sizing: border-box; }
+html { color-scheme: light dark; -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font: 17px/1.75 var(--serif);
+  text-wrap: pretty;
+}
+
+.bar { max-width: 46rem; margin: 0 auto; padding: 0 24px; display: flex; align-items: baseline; gap: 24px; flex-wrap: wrap; }
+.site-header { border-bottom: 1px solid var(--ink); }
+.site-header .bar { padding-top: 16px; padding-bottom: 14px; }
+.wordmark { font-weight: 600; font-size: 20px; letter-spacing: -0.01em; color: var(--ink); text-decoration: none; margin-right: auto; }
+.site-header nav { display: flex; gap: 20px; font-size: 15px; }
+.site-header nav a { color: var(--muted); text-decoration: none; }
+.site-header nav a:hover { color: var(--ink); text-decoration: underline; text-underline-offset: 4px; }
+
+.page { max-width: 46rem; margin: 0 auto; padding: 48px 24px 96px; overflow-wrap: anywhere; }
+.site-footer { border-top: 1px solid var(--rule); color: var(--muted); font-size: 14px; }
+.site-footer .bar { padding-top: 16px; padding-bottom: 40px; justify-content: space-between; }
+.site-footer a { color: var(--muted); }
+
+a { color: var(--link); text-underline-offset: 3px; }
+a:hover { text-decoration-thickness: 2px; }
+a:focus-visible { outline: 2px solid var(--link); outline-offset: 3px; }
+
+h1, h2, h3 { font-weight: 600; line-height: 1.3; letter-spacing: -0.01em; }
+h1 { font-size: 34px; margin: 0 0 8px; letter-spacing: -0.015em; }
+h2 { font-size: 22px; margin: 56px 0 12px; padding-top: 12px; border-top: 1px solid var(--rule); }
+h3 { font-size: 18px; margin: 32px 0 8px; }
+h1 code, h2 code, h3 code { font-size: 0.82em; }
+hr + h2 { border-top: 0; margin-top: 24px; }
+p { margin: 0 0 1em; }
+ul, ol { margin: 0 0 1em; padding-left: 1.5em; }
+li { margin: 0 0 0.35em; }
+li > p { margin-bottom: 0.4em; }
+strong { font-weight: 600; }
+hr { border: 0; border-top: 1px solid var(--rule); margin: 40px 0; }
+blockquote { margin: 0 0 1em; padding: 0 0 0 1.25em; font-style: italic; color: var(--muted); }
+
+code, pre { font-family: var(--mono); }
+code { font-size: 0.86em; background: var(--paper-2); padding: 0.1em 0.35em; }
+pre { font-size: 14px; line-height: 1.6; margin: 0 0 1.25em; padding: 14px 16px; background: var(--paper-2); border: 1px solid var(--rule); overflow-x: auto; overflow-wrap: normal; }
+pre code { font-size: inherit; background: none; padding: 0; }
+
+table { border-collapse: collapse; margin: 0 0 1.25em; display: block; overflow-x: auto; font-size: 15px; }
+th, td { text-align: left; padding: 8px 14px 8px 0; border-bottom: 1px solid var(--rule); vertical-align: top; }
+th { font-weight: 600; border-bottom-color: var(--ink); }
+
+img { max-width: 100%; height: auto; }
+
+@media (max-width: 640px) {
+  body { font-size: 16px; }
+  h1 { font-size: 28px; }
+  h2 { font-size: 20px; margin-top: 44px; }
+  .bar { padding-left: 16px; padding-right: 16px; }
+  .page { padding: 32px 16px 72px; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }

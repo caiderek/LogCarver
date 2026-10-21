@@ -5,7 +5,7 @@ description: "SQL Server 資料被 DELETE 或 UPDATE 改掉,沒有備份、也�
 
 # SQL Server 誤刪資料、沒有備份,怎麼救回來
 
-**[English](recover-deleted-rows.md) | 繁體中文**
+[English](recover-deleted-rows.md) / **繁體中文**
 
 這頁講的是沒有備份的情況。如果你有完整備份加上連續的交易記錄備份,直接還原到出事之前的時間點(`RESTORE LOG ... WITH STOPAT`)是最穩的做法,不用往下看。
 

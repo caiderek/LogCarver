@@ -5,7 +5,7 @@ description: "Can a deleted SQL Server row be recovered without a backup? Why do
 
 # LogCarver FAQ
 
-**English | [繁體中文](faq.zh-TW.md)**
+**English** / [繁體中文](faq.zh-TW.md)
 
 Answers to the questions people actually ask when SQL Server data goes missing. Each answer stands on its own — if you only read one, read the one with your exact problem.
 

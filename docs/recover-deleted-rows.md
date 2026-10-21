@@ -5,7 +5,7 @@ description: "Rows were deleted or overwritten in SQL Server, and you have no ba
 
 # How to recover deleted rows in SQL Server without a backup
 
-**English | [繁體中文](recover-deleted-rows.zh-TW.md)**
+**English** / [繁體中文](recover-deleted-rows.zh-TW.md)
 
 This page is for the case where you have no backup. If you have a full backup plus an unbroken chain of log backups, restore to a point in time just before the mistake (`RESTORE LOG ... WITH STOPAT`). That is the most reliable way, and you can stop reading here.
 

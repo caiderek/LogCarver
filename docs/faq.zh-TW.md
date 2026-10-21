@@ -5,7 +5,7 @@ description: "SQL Server 沒有備份,誤刪的資料還能救回來嗎?fn_dblog
 
 # LogCarver 常見問題
 
-**[English](faq.md) | 繁體中文**
+[English](faq.md) / **繁體中文**
 
 整理資料不見時大家真正會問的問題。每一題都可以獨立看——只想看跟自己狀況相符的那一題也沒問題。
 

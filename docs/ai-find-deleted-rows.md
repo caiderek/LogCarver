@@ -5,7 +5,7 @@ description: "Someone deleted rows from a SQL Server table and you want Claude C
 
 # Let an AI assistant find deleted rows in SQL Server (MCP)
 
-**English | [繁體中文](ai-find-deleted-rows.zh-TW.md)**
+**English** / [繁體中文](ai-find-deleted-rows.zh-TW.md)
 
 This page is about one case: rows were deleted from a SQL Server table, and you want an AI assistant such as Claude Code or Cursor to look at what was removed. If you only need to read the log yourself, see [how to recover deleted rows without a backup](recover-deleted-rows.md).
 

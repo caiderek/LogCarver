@@ -5,7 +5,7 @@ description: "You want Claude Code or Cursor to read and write a production SQL 
 
 # How to let an AI agent write to a production SQL Server safely
 
-**English | [繁體中文](ai-agent-sql-server-guardrails.zh-TW.md)**
+**English** / [繁體中文](ai-agent-sql-server-guardrails.zh-TW.md)
 
 This page is for the case where an AI coding agent already needs to touch a production SQL Server, and you would rather not give it the real credentials and a free hand.
 

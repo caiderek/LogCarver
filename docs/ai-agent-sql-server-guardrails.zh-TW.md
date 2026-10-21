@@ -5,7 +5,7 @@ description: "想讓 Claude Code 或 Cursor 讀寫正式環境的 SQL Server,又
 
 # 怎麼讓 AI agent 比較安全地寫入正式環境的 SQL Server
 
-**[English](ai-agent-sql-server-guardrails.md) | 繁體中文**
+[English](ai-agent-sql-server-guardrails.md) / **繁體中文**
 
 這頁講的是:AI 寫程式的 agent 已經需要碰正式環境的 SQL Server,但你不想把真正的帳密和不受限的權限交給它。
 

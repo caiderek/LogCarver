@@ -5,7 +5,7 @@ description: "SQL Server 的資料表被刪了資料,想請 Claude Code 或 Curs
 
 # 讓 AI 助理幫你查 SQL Server 被刪掉的資料(MCP)
 
-**[English](ai-find-deleted-rows.md) | 繁體中文**
+[English](ai-find-deleted-rows.md) / **繁體中文**
 
 這頁只講一種情況:資料表裡的資料被刪了,你想請 Claude Code 或 Cursor 這類 AI 助理幫忙查被刪了什麼。如果你只是想自己讀記錄檔,看[沒有備份時怎麼救回被刪的資料](recover-deleted-rows.zh-TW.md)。
 
