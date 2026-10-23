@@ -346,9 +346,10 @@ static async Task<int> RunAsync(string server, string database, string tableName
 
         if (options.OutputPath is not null)
         {
-            // A .sql file gets a UTF-8 BOM: without one SSMS opens it in the
-            // system ANSI code page and garbles non-ASCII (e.g. Chinese) text.
-            System.Text.Encoding? fileEncoding = options.ExportFormat == "sql" ? new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: true) : null;
+            // A .sql or .csv file gets a UTF-8 BOM: without one SSMS / Excel open
+            // it in the system ANSI code page and garble non-ASCII (e.g. Chinese)
+            // text. JSON stays BOM-free (parsers reject a leading BOM).
+            System.Text.Encoding? fileEncoding = options.ExportFormat is "sql" or "csv" ? new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: true) : null;
             RowEventExporter.WriteFileAtomically<object?>(options.OutputPath, writer => { WriteTo(writer); return null; }, fileEncoding);
             if (options.ExportFormat == "sql")
             {

@@ -81,7 +81,7 @@ LogCarver.exe <server> <database> <schema.table> [--from <datetime>] [--to <date
 | `--snapshot <datetime>` | 重建那個確切時間點每一列的樣子,而不是列出事件清單。會忽略 `--from`/`--to`/`--key`/`--undo`/`--replay`。 |
 | `--user <name>` / `--password <pw>` | 改用 SQL 帳號密碼登入,不用目前的 Windows 帳號。兩個要嘛一起給、要嘛都不給。密碼在執行期間會出現在你的 shell 紀錄跟這個行程的命令列裡 —— 能用 Windows 驗證就盡量用。 |
 | `--timeout <seconds>` | 調高每次掃描記錄檔查詢的時間上限(預設 120 秒,`0` 表示不限制)。使用中的記錄檔很大時需要,因為每次執行會把整份記錄檔讀超過一次;建議在離峰時段跑。 |
-| `--export csv\|json\|sql` / `--output <path>` | 把結果輸出成檔案(或標準輸出),不用主控台的列表格式。`csv` 和 `json`:每個觀察到的資料表欄位各一欄(`Before_<Col>` / `After_<Col>`),不會把前後值擠進同一格。`sql`:一份可以直接執行的 `.sql` 腳本,內容是 `--undo` 的還原語句(由新到舊),或 `--replay` 的重播語句(由舊到新);兩個只能擇一。檔案是 UTF-8 含 BOM,SSMS 才會正確讀到中文。不適用於 `--snapshot`。`--output` 會寫進指定檔案而不是標準輸出,而且必須搭配 `--export`。 |
+| `--export csv\|json\|sql` / `--output <path>` | 把結果輸出成檔案(或標準輸出),不用主控台的列表格式。`csv` 和 `json`:每個觀察到的資料表欄位各一欄(`Before_<Col>` / `After_<Col>`),不會把前後值擠進同一格。`sql`:一份可以直接執行的 `.sql` 腳本,內容是 `--undo` 的還原語句(由新到舊),或 `--replay` 的重播語句(由舊到新);兩個只能擇一。用 `--output` 寫出的 `.sql` 和 `.csv` 檔是 UTF-8 含 BOM,SSMS 和 Excel 才會正確讀到中文(`json` 不加 BOM)。不適用於 `--snapshot`。`--output` 會寫進指定檔案而不是標準輸出,而且必須搭配 `--export`。 |
 
 範例:
 
