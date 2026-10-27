@@ -14,9 +14,9 @@ namespace LogCarver.Core.IntegrationTests;
 /// silently wrong is the worst outcome; an event that is merely refused or flagged also fails here,
 /// because every shape in this matrix is expected to decode completely.
 ///
-/// Why this exists: the rollback handling was first tested only with hand-written log records that
-/// assumed what SQL Server writes for a rollback (2026-10-14), and the assumption was wrong -
-/// see RolledBackTransactionTests and CompensationNormalizer.
+/// Why this exists: hand-written log records that assume what SQL Server writes for a rollback
+/// can be wrong; this matrix uses what a real server writes - see RolledBackTransactionTests
+/// and CompensationNormalizer.
 /// </summary>
 [Collection("SqlServer")]
 public class RollbackMatrixTests(SqlServerFixture fixture, ITestOutputHelper output)

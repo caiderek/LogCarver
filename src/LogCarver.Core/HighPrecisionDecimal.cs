@@ -8,11 +8,9 @@ namespace LogCarver.Core;
 /// digits) - SQL Server's own on-disk format for this precision range
 /// uses a 128-bit unsigned magnitude (4 little-endian uint32 "groups"),
 /// which doesn't fit System.Decimal's 96-bit one. BigInteger has no such
-/// ceiling, so it's used here instead - found for real 2026-10-08 via an
-/// independent cross-check agent hitting a DECIMAL(38,10) column:
-/// undo generation was silently refusing this precision range entirely
-/// (an honest, safely-degrading refusal, not corruption - but a real,
-/// fixable gap given .NET already ships BigInteger for exactly this).
+/// ceiling, so it's used here instead: without it, a DECIMAL(38,10) column
+/// would make undo generation refuse this precision range entirely (an honest,
+/// safely-degrading refusal, not corruption).
 /// </summary>
 /// <param name="UnscaledValue">
 /// The full-precision integer magnitude, already signed (negative for a

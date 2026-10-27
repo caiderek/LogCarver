@@ -44,8 +44,7 @@ public class SchemaReaderTests(SqlServerFixture fixture)
     }
 
     /// <summary>
-    /// Regression test for the bug found during real CLI testing against
-    /// SQL Server 2019 on 2026-09-28: sys.partitions has one row per index,
+    /// Regression test: sys.partitions has one row per index,
     /// not per table. A heap table with any nonclustered index (here, one
     /// backing a NONCLUSTERED PRIMARY KEY) has two partition rows -
     /// index_id=0 for the heap itself, index_id=2 for the index. Without
@@ -130,8 +129,7 @@ public class SchemaReaderTests(SqlServerFixture fixture)
     }
 
     /// <summary>
-    /// Regression test for a gap an independent reviewer caught in the fix
-    /// above: blindly keeping "whichever partition's row came back first"
+    /// Regression test for the fix above: blindly keeping "whichever partition's row came back first"
     /// is only safe if every partition's physical row layout is actually
     /// identical. SQL Server allows per-partition DATA_COMPRESSION
     /// (ALTER TABLE ... REBUILD PARTITION = n WITH (DATA_COMPRESSION = ...)),

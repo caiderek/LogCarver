@@ -93,7 +93,7 @@ public class CompensationNormalizerTests
         Assert.Same(records, CompensationNormalizer.FillCompensationOldBytes(records));
     }
 
-    // ---- The real sequence that produced a wrong undo SQL (2026-10-18) -------------------------
+    // ---- The real sequence that produced a wrong undo SQL -----------------------------------
 
     private static readonly IReadOnlyList<ColumnSchema> NameTableSchema =
     [

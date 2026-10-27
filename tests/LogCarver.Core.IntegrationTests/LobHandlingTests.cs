@@ -11,14 +11,9 @@ public class LobHandlingTests(EdgeCaseFixture fixture)
     [Fact]
     public async Task InRowLobDecodesCleanly_OversizedLobDecodesAsThePlaceholder()
     {
-        // Stale test, found 2026-10-08 while running the full suite after
-        // today's off-row/LOB undo-corruption fix (see RowDecoder's and
-        // TransactionUndoAssembler's own doc comments): this test still
-        // asserted the OLD behavior (throws UnsupportedRowFormatException
-        // and loses the whole row) from before that was replaced with a
-        // placeholder-string decode (committed in d89fff0, confirmed via
-        // `git show` to predate ALL of today's changes - this breakage is
-        // pre-existing, not caused by anything in this round).
+        // An oversized LOB decodes to a placeholder string; it must not throw
+        // UnsupportedRowFormatException and lose the whole row (see RowDecoder's and
+        // TransactionUndoAssembler's own doc comments).
         //
         // EdgeCaseFixture's 100,000-char value is well past fn_dblog's own
         // ~8000-byte RowLog Contents capture limit, not past SQL Server's

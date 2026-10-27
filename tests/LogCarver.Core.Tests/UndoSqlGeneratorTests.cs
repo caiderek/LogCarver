@@ -253,12 +253,10 @@ public class UndoSqlGeneratorTests
     [Fact]
     public void GuidValue_FormatsAsAQuotedString()
     {
-        // Same missing-case pattern as bigint/decimal/bool before it: found
-        // 2026-10-08 via an independent cross-check agent hitting a GUID
-        // primary key (an entirely ordinary schema choice) - undo
-        // generation crashed with NotSupportedException, degrading safely
-        // (caught further up the stack, same as the bool gap) but leaving
-        // GUID-keyed tables with zero undo capability. SQL Server accepts
+        // Same pattern as bigint/decimal/bool: a GUID primary key is an entirely ordinary
+        // schema choice, and without this case undo generation would crash with
+        // NotSupportedException, leaving GUID-keyed tables with no undo capability.
+        // SQL Server accepts
         // a UNIQUEIDENTIFIER literal as a plain quoted string in its
         // canonical form.
         var guid = new Guid("12345678-90ab-cdef-1234-567890abcdef");
@@ -273,9 +271,8 @@ public class UndoSqlGeneratorTests
     [Fact]
     public void HighPrecisionDecimalValue_FormatsAsAPlainDecimalLiteral()
     {
-        // Same missing-case pattern, found the same session: a
-        // DECIMAL(38,10) column (precision outside System.Decimal's own
-        // ~28-29 digit ceiling) used to be refused at the DECODE level
+        // Same pattern: a DECIMAL(38,10) column (precision outside System.Decimal's own
+        // ~28-29 digit ceiling) must not be refused at the DECODE level
         // entirely (RowDecoder's own, deliberate "doesn't fit, refuse
         // rather than guess" design - see HighPrecisionDecimal's own doc
         // comment for why BigInteger, which has no such ceiling, fixes

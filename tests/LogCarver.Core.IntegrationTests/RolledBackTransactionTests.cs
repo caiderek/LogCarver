@@ -6,11 +6,10 @@ using Xunit;
 namespace LogCarver.Core.IntegrationTests;
 
 /// <summary>
-/// Found for real 2026-10-18: after BEGIN TRAN; UPDATE; ROLLBACK on a row, the next same-length
-/// UPDATE of that row was decoded against a row image one byte too long and produced an undo SQL
-/// with a garbled value (N'other-db-val〱'), with no error. SQL Server's compensation record for
-/// the rollback carries no old bytes, which the splice read as "insert one byte"
-/// (see CompensationNormalizer).
+/// After BEGIN TRAN; UPDATE; ROLLBACK on a row, the next same-length UPDATE of that row must not
+/// be decoded against a row image one byte too long (which gives an undo SQL with a garbled
+/// value and no error). SQL Server's compensation record for the rollback carries no old bytes,
+/// which a splice would read as "insert one byte" (see CompensationNormalizer).
 /// </summary>
 [Collection("SqlServer")]
 public class RolledBackTransactionTests(SqlServerFixture fixture)

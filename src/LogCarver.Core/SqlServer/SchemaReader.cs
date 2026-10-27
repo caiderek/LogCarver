@@ -13,8 +13,7 @@ namespace LogCarver.Core.SqlServer;
 /// nonclustered index (e.g. one backing a NONCLUSTERED PRIMARY KEY) joins
 /// in that index's own internal column layout alongside the heap's real
 /// one, producing bogus SystemTypeId values for columns not covered by the
-/// index - found for real on 2026-09-28 via a heap table with a
-/// PRIMARY KEY NONCLUSTERED constraint (see SchemaReaderTests).
+/// index (for example a heap table with a PRIMARY KEY NONCLUSTERED constraint; see SchemaReaderTests).
 ///
 /// Table partitioning: sys.partitions also has one row per PARTITION for a
 /// given index_id, not just one - a table with N partitions returns this
@@ -46,13 +45,11 @@ namespace LogCarver.Core.SqlServer;
 /// Non-unique clustered index: SQL Server reserves variable-length slot
 /// -1 (and null-bitmap bit 1) for a hidden "uniquifier" column that
 /// disambiguates duplicate clustering-key values - reserved whether or
-/// not any given row actually needs one materialized (found for real
-/// 2026-10-02, confirmed via sys.indexes.is_unique plus manual hex
-/// decoding of real fn_dblog row bytes: a table with a non-unique
-/// clustered index on a different column than its PK had its real
+/// not any given row actually needs one materialized (a table with a
+/// non-unique clustered index on a different column than its PK has its real
 /// variable-length columns' own labels start at -2, not -1, and decoding
-/// without accounting for the gap put each NVARCHAR column's bytes one
-/// slot off from where they belonged - a plausible-looking WRONG value,
+/// without accounting for the gap puts each NVARCHAR column's bytes one
+/// slot off from where they belong - a plausible-looking WRONG value,
 /// not an honest failure). This is invisible to sys.columns (it's not a
 /// user column at all), so GetTableSchemaAsync queries sys.indexes
 /// separately and, when the clustered index exists and is non-unique,

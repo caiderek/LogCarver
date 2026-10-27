@@ -5,7 +5,7 @@ using Xunit;
 namespace LogCarver.Core.Tests;
 
 /// <summary>
-/// Row tracking and anchoring edge cases found by an independent review:
+/// Row tracking and anchoring edge cases:
 /// every one is a way for a change to be attached to the wrong row, or for a
 /// rebuilt before-image to be taken from a row that is not the changed one.
 /// Row images are the real SQL Server 2025 captures used in RowAnchoringTests.

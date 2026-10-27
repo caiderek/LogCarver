@@ -49,9 +49,7 @@ public sealed class SqlServerFixture : IAsyncLifetime
             // (auto-truncates the log on checkpoint) until its first full
             // backup - "pseudo-simple" mode. Without this, a slow test run
             // can have SQL Server checkpoint and silently wipe out this
-            // fixture's own workload before a later test queries it - found
-            // for real via CLI testing against SQL Server 2019 on
-            // 2026-09-28, not a theoretical concern. Backing up to NUL
+            // fixture's own workload before a later test queries it - a real risk. Backing up to NUL
             // performs a real backup (anchoring true FULL behavior) without
             // writing a file anywhere.
             await ExecAsync(master, $"BACKUP DATABASE [{DatabaseName}] TO DISK = 'NUL:';");

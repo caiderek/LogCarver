@@ -55,8 +55,7 @@ namespace LogCarver.Core.SqlServer;
 /// before-image requires replaying every prior write to the same
 /// page/slot, which can be arbitrarily far back in the log - narrowing
 /// the start would risk silently wrong (not just missing) before-images.
-/// Left null (the default), behavior is unchanged from before this
-/// parameter existed - a full fn_dblog(NULL, NULL) scan.
+/// Left null (the default), a full fn_dblog(NULL, NULL) scan is done.
 ///
 /// IMPORTANT - the string fn_dblog itself prints in [Current LSN]
 /// ("AAAAAAAA:BBBBBBBB:CCCC", colon-hex) is NOT what its own start/end
@@ -64,10 +63,7 @@ namespace LogCarver.Core.SqlServer;
 /// (blog posts, even a Qlik support article) shows. Passing that format
 /// back in throws SqlException 9005 ("Invalid parameter passed to
 /// OpenRowset(DBLog, ...)") on every SQL Server version tried, including
-/// 2025 - confirmed empirically 2026-10-08 after a first attempt at this
-/// exact feature was built, fully tested, and reverted believing fn_dblog
-/// had stopped accepting bounded calls entirely. It hadn't; the format was
-/// wrong. The real accepted input format (reverse-engineered from
+/// 2025. The accepted input format (reverse-engineered from
 /// msdb.dbo.backupset's LSN columns, confirmed via a real begin/commit/
 /// scan round-trip) is a single decimal string: VLF sequence number
 /// (decimal, no padding) + log block offset (decimal, zero-padded to 10

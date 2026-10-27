@@ -175,7 +175,7 @@ public static class RowHistoryReconstructor
             // A compensation record is about exactly the row of the record it undoes. Resolving it
             // like a fresh record loses that: the compensation of a DELETE is an INSERT that carries
             // no key hash, so it was tracked as a new row, and the next change of the real row found
-            // nothing to apply to (found by the rollback matrix, 2026-10-18).
+            // nothing to apply to.
             if (record.IsCompensation && record.TransactionId is not null &&
                 undoStack.TryGetValue(record.TransactionId, out var compensationStack) &&
                 compensationStack.Count > 0 && IsInverse(compensationStack.Peek(), record))

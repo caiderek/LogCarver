@@ -8,9 +8,8 @@ namespace LogCarver.Core.IntegrationTests;
 public class FnDblogReaderTests(SqlServerFixture fixture)
 {
     /// <summary>
-    /// Regression test for the bug found during CLI testing on 2026-09-23:
-    /// FnDblogReader's query originally filtered to
-    /// Context='LCX_CLUSTERED' only, which silently excluded every
+    /// Regression test: FnDblogReader's query must not filter to
+    /// Context='LCX_CLUSTERED' only, which would silently exclude every
     /// DELETE (DELETE uses Context='LCX_MARK_AS_GHOST'). Change the SQL
     /// in FnDblogReader.cs back to that single-context filter and this
     /// test must fail.
@@ -44,10 +43,9 @@ public class FnDblogReaderTests(SqlServerFixture fixture)
     }
 
     /// <summary>
-    /// Regression test for the bug found during real CLI testing against
-    /// SQL Server 2019 on 2026-09-28: a heap table (no clustered index)
-    /// uses Context='LCX_HEAP' for INSERT/UPDATE/DELETE alike, which the
-    /// original two-context filter excluded entirely - every heap table
+    /// Regression test: a heap table (no clustered index)
+    /// uses Context='LCX_HEAP' for INSERT/UPDATE/DELETE alike, which a
+    /// two-context filter would exclude entirely - every heap table
     /// silently reported 0 events, misread as "fn_dblog rotated past this"
     /// rather than "this tool never looked at heap tables' rows at all".
     /// </summary>
@@ -78,11 +76,10 @@ public class FnDblogReaderTests(SqlServerFixture fixture)
     }
 
     /// <summary>
-    /// Regression test for the bug found during real CLI testing against
-    /// SQL Server 2019 on 2026-09-28: a heap table WITH a nonclustered
+    /// Regression test: a heap table WITH a nonclustered
     /// index (e.g. one backing a PRIMARY KEY NONCLUSTERED) also has its own
     /// AllocUnitName ("schema.table.indexname") for that index's own
-    /// maintenance activity - which the original AllocUnitName-prefix
+    /// maintenance activity - which an AllocUnitName-prefix
     /// guess for heaps ("schema.table" exact match, no suffix at all) does
     /// technically avoid pulling in via a LIKE prefix, but which a naive
     /// broader match easily could. This pins the fixed behavior down

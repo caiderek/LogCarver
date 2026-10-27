@@ -67,24 +67,12 @@ internal static class SqlStatementBuilder
         return $"UPDATE {EscapeIdentifier(tableName)} SET {setClause} WHERE {BuildWhereClause(matchValues)};";
     }
 
-    // Real bug, found 2026-10-08 via an independent cross-check agent's
-    // SECOND testing round, hours after the FIRST fix for this same
-    // DateTime-comparison area shipped: wrapping only the LITERAL side in
-    // CONVERT(DATETIME2(7), ...) (see FormatSqlLiteral's own doc comment)
-    // fixed the outright-throws-an-error case, but comparing that
-    // DATETIME2(7)-typed literal directly against a plain DATETIME column
-    // is itself unreliable - confirmed via a direct, repeated sqlcmd probe:
-    // `@datetimeCol = CONVERT(DATETIME2(7), @matchingLiteral)` intermittently
-    // returns NO MATCH even when an explicit CAST of the column to
-    // DATETIME2(7) first provably equals the same literal. SQL Server's
-    // documented data-type-precedence table says DATETIME2 outranks
-    // DATETIME (implying the DATETIME side should always widen up for an
-    // implicit comparison), but that is not what was observed empirically -
-    // whatever the real mechanism, relying on implicit cross-type
-    // comparison here is not safe. Explicitly converting BOTH sides to the
-    // same type removes the ambiguity entirely and was confirmed reliable
-    // the same way. A plain string/int/etc. column is unaffected - only a
-    // DateTime value's own column reference needs the wrap.
+    // Comparing a DATETIME2(7)-typed literal directly against a plain DATETIME column
+    // is unreliable: `@datetimeCol = CONVERT(DATETIME2(7), @matchingLiteral)`
+    // can return NO MATCH even when an explicit CAST of the column to
+    // DATETIME2(7) first provably equals the same literal. Explicitly converting
+    // BOTH sides to the same type removes the ambiguity. A plain string/int/etc.
+    // column is unaffected - only a DateTime value's own column reference needs the wrap.
     private static string BuildWhereClause(IReadOnlyDictionary<string, object?> row) =>
         string.Join(" AND ", row.Select(kv => kv.Value switch
         {
@@ -96,7 +84,7 @@ internal static class SqlStatementBuilder
             // is the documented comparison method for these two types;
             // hierarchyid (the third type sharing system_type_id 240) DOES
             // support "=" and isn't special-cased here - only found to be
-            // a problem for geography/geometry specifically, 2026-10-08.
+            // a problem for geography/geometry specifically.
             SqlClrBinaryValue clr when clr.TypeName is "geography" or "geometry" =>
                 $"{EscapeIdentifier(kv.Key)}.STEquals({FormatSqlLiteral(kv.Value)}) = 1",
             _ => $"{EscapeIdentifier(kv.Key)} = {FormatSqlLiteral(kv.Value)}",
@@ -146,30 +134,15 @@ internal static class SqlStatementBuilder
         // resolution is 100ns, exactly DATETIME2(7)'s max precision, so 7
         // fractional digits round-trips losslessly.
         //
-        // Real regression in that same fix, found 2026-10-08 via an
-        // independent cross-check agent's second testing round, within
-        // hours of the first fix shipping: the claim above that "lower-
-        // precision DATETIME/SMALLDATETIME columns just get trailing
-        // zeros, which the implicit conversion still matches correctly"
-        // was never actually verified against a real DATETIME column, and
-        // was wrong - a bare 7-fractional-digit string literal
-        // ('...12:00:00.0000000') against a DATETIME target throws SQL
-        // Server error 241 ("Conversion failed when converting date
-        // and/or time from character string") outright, confirmed via a
-        // direct sqlcmd probe (CONVERT accepts up to 3 digits for
-        // DATETIME's own string-literal grammar, not 7). This broke both
-        // directions: an UPDATE undo's WHERE clause would throw instead of
-        // just mismatching, and a DELETE undo's INSERT (which embeds the
-        // literal directly into VALUES) failed outright on restore. Fixed
-        // by wrapping in an explicit CONVERT(DATETIME2(7), '...') instead
-        // of a bare string literal - DATETIME2(7)'s own string grammar
-        // accepts all 7 digits unconditionally (confirmed, it's what this
-        // whole fix already relies on), and converting a DATETIME2 value
-        // (not a raw string) to DATETIME/SMALLDATETIME afterward is an
-        // ordinary, always-succeeding, well-defined precision-narrowing
-        // conversion - never a string-parse error - confirmed via the same
-        // direct sqlcmd probe: CONVERT(DATETIME2(7), '...0000000') assigned
-        // to a DATETIME variable rounds cleanly to '...000', no error.
+        // Lower-precision DATETIME/SMALLDATETIME columns cannot take a bare
+        // 7-fractional-digit string literal ('...12:00:00.0000000'): SQL Server
+        // raises error 241 ("Conversion failed when converting date and/or time
+        // from character string"), because CONVERT accepts up to 3 digits for
+        // DATETIME's own string-literal grammar. So the literal is wrapped in an
+        // explicit CONVERT(DATETIME2(7), '...'): DATETIME2(7)'s string grammar
+        // accepts all 7 digits, and converting a DATETIME2 value (not a raw string)
+        // to DATETIME/SMALLDATETIME is an ordinary precision-narrowing conversion
+        // that never raises a string-parse error.
         DateTime dt => $"CONVERT(DATETIME2(7), '{dt:yyyy-MM-dd HH:mm:ss.fffffff}')",
         // decimal.ToString() never uses scientific notation (unlike
         // double/float), so this always produces a plain SQL Server
@@ -182,24 +155,16 @@ internal static class SqlStatementBuilder
         // HighPrecisionDecimal.ToString() already produces a plain decimal
         // literal (no scientific notation) - see that type's own doc
         // comment for why DECIMAL(29-38 digits) needs it instead of
-        // System.Decimal. Added alongside the DecodeDecimal 4-group case -
-        // missed here until an independent cross-check agent hit a real
-        // DECIMAL(38,10) column 2026-10-08 and got the same
-        // NotSupportedException class as every other missing-case gap
-        // above, just one level removed (RowDecoder itself had already
-        // been refusing to decode this precision range at all before that
-        // same session's fix - see RowDecoder's own doc comment).
+        // System.Decimal. Needed alongside the DecodeDecimal 4-group case: without it a
+        // DECIMAL(38,10) column would raise the same NotSupportedException as every other
+        // missing literal case (see RowDecoder's own doc comment).
         HighPrecisionDecimal hp => hp.ToString(),
         string s => $"N'{s.Replace("'", "''")}'",
         // SQL Server accepts a UNIQUEIDENTIFIER literal as a plain quoted
         // string in its canonical "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
         // form, which Guid.ToString()'s default format already produces.
-        // Same missing-case pattern as every entry above: found 2026-10-08
-        // via an independent cross-check agent hitting a GUID primary key
-        // (an entirely ordinary schema choice) - this one degraded safely
-        // (caught by GuardedSqlExecutor's existing UndoGenerationError
-        // handling, not a crash), but the underlying gap meant GUID-keyed
-        // tables had zero undo capability, full stop.
+        // A GUID primary key is an entirely ordinary schema choice; without this case
+        // GUID-keyed tables would have no undo capability.
         Guid g => $"'{g}'",
         // T-SQL has no boolean literal - BIT columns are written/compared
         // as 1/0. Without this case a BIT column would crash undo generation with

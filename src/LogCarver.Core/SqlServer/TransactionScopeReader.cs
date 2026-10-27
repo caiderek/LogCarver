@@ -31,13 +31,12 @@ public sealed record TouchedTable(string Schema, string Table, string AllocUnitN
 /// table twice, producing duplicate undo entries (for example a FK cascade
 /// delete where the child table has an index on its FK column).
 ///
-/// LSN bounding (added 2026-10-08): unlike FnDblogReader, this query only
+/// LSN bounding: unlike FnDblogReader, this query only
 /// asks "which AllocUnitNames did THIS transaction's own row events touch" -
 /// it never needs history from before the transaction, so it's safe to
 /// bound BOTH ends to the transaction's own begin/commit LSN. See
-/// FnDblogReader's own doc comment for the full incident this was added to
-/// fix, why FnDblogReader itself can only take an upper bound, and - most
-/// importantly - the real (non-obvious) numeric string format fn_dblog's
+/// FnDblogReader's own doc comment for why FnDblogReader itself can only take an
+/// upper bound, and for the numeric string format fn_dblog's
 /// parameters actually require.
 /// </summary>
 public static class TransactionScopeReader

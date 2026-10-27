@@ -114,9 +114,8 @@ public class RowHistoryReconstructorTests
     [Fact]
     public void ModifyColumns_RefusedOutright_NeverFedToRowPatcher()
     {
-        // Regression test for a real bug: an earlier version of this method
-        // grouped LOP_MODIFY_COLUMNS with LOP_MODIFY_ROW and spliced its
-        // RowLogContents via RowPatcher, which doesn't throw - it silently
+        // Regression test: LOP_MODIFY_COLUMNS must not be grouped with LOP_MODIFY_ROW and
+        // have its RowLogContents spliced via RowPatcher, which doesn't throw - it silently
         // produces a corrupted row that decodes to garbage (observed
         // against a real captured record: a garbage Id and the other
         // columns missing entirely, with no error or Note at all).

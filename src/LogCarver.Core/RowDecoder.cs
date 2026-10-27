@@ -348,10 +348,10 @@ public static class RowDecoder
                     // The offset-array entry itself is a real 2-byte value
                     // this decoder reads and trusts - flagging it isn't
                     // optional polish. This is exactly the mechanism behind
-                    // the original real bug this whole feature exists for:
-                    // DecisionFlag's entry (not its data bytes) was the one
-                    // corrupted, computing a wildly wrong length that read
-                    // 63 bytes into two unrelated downstream columns.
+                    // the case this whole feature exists for: a
+                    // column's entry (not its data bytes) being the one
+                    // corrupted, computing a wildly wrong length that reads
+                    // into unrelated downstream columns.
                     FlagIfOverlapping(col.Name, offsetEntryPos, 2);
 
                     if (isComplexColumn)
@@ -420,12 +420,10 @@ public static class RowDecoder
 
             // Trailing variable-length columns omitted entirely from the row
             // (SQL Server drops the offset-array entry for a NULL column
-            // that's last in declaration order) - verified in 研究紀錄 第九節.
+            // that's last in declaration order).
             // The null bitmap still tells NULL from an empty string, which
-            // is dropped the same way: found 2026-10-14 by comparing decoded
-            // UPDATE after-images against the table's real contents - a
-            // trailing '' came back as NULL (13 of 391 rows in a random
-            // workload), and an undo built from it would write NULL.
+            // is dropped the same way: without the bitmap a
+            // trailing '' would come back as NULL, and an undo built from it would write NULL.
             for (int i = varColCount; i < varCols.Count; i++)
             {
                 var omitted = varCols[i];

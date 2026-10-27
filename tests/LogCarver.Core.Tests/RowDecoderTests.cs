@@ -293,7 +293,7 @@ public class RowDecoderTests
         // event in such a table since UndoSqlGenerator/ReplaySqlGenerator
         // both require a non-null Before/After image to work from.
         //
-        // 2026-01-15 is 739630 days after 0001-01-01 (independently computed
+        // The date 2026-01-15 is 739630 days after 0001-01-01 (independently computed
         // via .NET's own DateTime subtraction, not via this decoder), stored
         // as the same 3-byte little-endian day count DATETIME2's date part
         // already uses: 739630 = 0x000B492E -> bytes 2E 49 0B.
@@ -374,9 +374,8 @@ public class RowDecoderTests
     public void Decode_OffRowLobColumn_IsFlaggedAsPossiblyCorrupted()
     {
         // Same real captured row as Decode_OffRowLobColumn_IsMarkedNotDecoded_OtherColumnsUnaffected.
-        // Real bug, found 2026-10-08 via an independent cross-check agent:
-        // this flagging was missing for the off-row case even though the
-        // adjacent out-of-bounds case already did it - see RowDecoder's own
+        // This flagging must also apply to the off-row case, as it already does for the
+        // adjacent out-of-bounds case - see RowDecoder's own
         // doc comment and TransactionUndoAssembler.ProcessTableAsync, the
         // automated caller that actually depends on this flag existing to
         // avoid executing the placeholder text as if it were real data.
@@ -760,9 +759,7 @@ public class RowDecoderTests
     // dbo.DecPrecisionProbe: Id INT, Val DECIMAL(38,10) - 17-byte storage
     // (precision 29-38, 4 base-2^32 groups), the one precision bucket
     // DecodeDecimal used to refuse outright (its 128-bit magnitude doesn't
-    // fit System.Decimal's 96-bit one). Found missing for real 2026-10-08
-    // via an independent cross-check agent hitting a real DECIMAL(38,10)
-    // column - undo generation was silently unavailable for it.
+    // fit System.Decimal's 96-bit one).
     private static readonly IReadOnlyList<ColumnSchema> DecPrecisionSchema =
     [
         new ColumnSchema("Id", 1, LeafOffset: 4, LeafNullBit: 1, MaxLength: 4, SystemTypeId: 56),
@@ -801,13 +798,11 @@ public class RowDecoderTests
         Assert.Equal("999999999999999999999999999.9999999999", val.ToString());
     }
 
-    // dbo.CrossCheck_Blob2: Id INT IDENTITY, Blob VARBINARY(MAX) - real
-    // capture from an independent cross-check agent's fourth testing round,
-    // 2026-10-08: every variable-length column used to decode as text
-    // unconditionally (see RowDecoder.DecodeVariableLengthValue's own doc
-    // comment), so VARBINARY's raw bytes came out as garbled Windows-1252
-    // text instead of a byte[] - undo SQL built from it could never
-    // actually execute.
+    // dbo.CrossCheck_Blob2: Id INT IDENTITY, Blob VARBINARY(MAX) - a real capture.
+    // Decoding every variable-length column as text would turn VARBINARY's raw bytes
+    // into garbled Windows-1252 text instead of a byte[] (see
+    // RowDecoder.DecodeVariableLengthValue's own doc comment), and undo SQL built
+    // from it could never actually execute.
     private static readonly IReadOnlyList<ColumnSchema> VarBinarySchema =
     [
         new ColumnSchema("Id", 1, LeafOffset: 4, LeafNullBit: 1, MaxLength: 4, SystemTypeId: 56),

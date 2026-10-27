@@ -39,11 +39,9 @@ public class DdlBoundaryReaderTests(SqlServerFixture fixture)
     }
 
     /// <summary>
-    /// Regression test for a real gap found alongside the table-partitioning
-    /// investigation on 2026-09-30: the hobt_id lookup had no index_id
-    /// filter at all, so sys.partitions' one-row-per-index shape meant
-    /// ExecuteScalar could pick a secondary index's own hobt_id instead of
-    /// the table's own heap/clustered one - not limited to partitioned
+    /// Regression test: the hobt_id lookup must filter on index_id. sys.partitions has one
+    /// row per index, so without the filter ExecuteScalar could pick a secondary index's own
+    /// hobt_id instead of the table's own heap/clustered one - not limited to partitioned
     /// tables, any table with a secondary index was exposed. Matching DDL
     /// against the wrong hobt_id finds zero boundaries where a real one
     /// exists, silently defeating the schema-drift guard this class exists
@@ -84,10 +82,9 @@ public class DdlBoundaryReaderTests(SqlServerFixture fixture)
     /// with no warning (exactly the "94%"-class silent-corruption failure
     /// mode this whole class exists to prevent).
     ///
-    /// Uses REBUILD PARTITION = 3, not ADD COLUMN: an independent reviewer
-    /// caught that ADD COLUMN is metadata-only and applies to every
-    /// partition's hobt at once, so it would find a boundary even against
-    /// the old single-hobt code and pass for the wrong reason.
+    /// Uses REBUILD PARTITION = 3, not ADD COLUMN: ADD COLUMN is metadata-only and applies to every
+    /// partition's hobt at once, so it would find a boundary even with a single-hobt
+    /// lookup and pass for the wrong reason.
     /// REBUILD PARTITION = 3 WITH (DATA_COMPRESSION = ROW) is a genuine
     /// physical rewrite intended to touch only that one partition's own
     /// hobt_id, which is what this test means to exercise ("check every

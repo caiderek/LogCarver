@@ -11,8 +11,8 @@ namespace LogCarver.Core.SqlServer;
 /// splices a byte range as "replace Contents0.Length bytes at the offset by Contents1", so a
 /// compensation record that replaced one byte was read as an INSERTION of one byte: the row
 /// image grew by one byte from there on, and every later change to that row was decoded
-/// against a shifted image (found for real 2026-10-18: after BEGIN TRAN; UPDATE; ROLLBACK, the
-/// next same-length UPDATE of the row got an undo SQL like SET [Name] = N'other-db-val〱', with
+/// against a shifted image (for example after BEGIN TRAN; UPDATE; ROLLBACK, the
+/// next same-length UPDATE of the row would get a garbled undo SQL, with
 /// no error anywhere).
 ///
 /// What a compensation record replaces is exactly what the record it undoes wrote: the new
