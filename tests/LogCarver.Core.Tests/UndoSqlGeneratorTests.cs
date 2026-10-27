@@ -93,9 +93,7 @@ public class UndoSqlGeneratorTests
         // separately) crashed the entire Undo/Replay generation outright
         // with "Cannot format a SQL literal for value of type
         // System.Decimal" instead of producing a statement for this one
-        // row, taking every other row in the export down with it. Real
-        // customer impact: DECISION.StockDecisionDaily's ConfidenceScore/
-        // EvidenceCompleteness/TargetPrice columns.
+        // row, taking every other row in the export down with it.
         var row = new Dictionary<string, object?> { ["Id"] = 5, ["Score"] = 123.45m };
         var evt = new RowEvent("lsn1", RowEventKind.Insert, null, row, null, null, "0001:0F", 1);
 
@@ -118,12 +116,11 @@ public class UndoSqlGeneratorTests
     [Fact]
     public void BigIntValue_FormatsAsPlainNumericLiteral_NotThrows()
     {
-        // Same class of gap as the decimal case above, found the same way:
-        // SqlStatementBuilder.FormatSqlLiteral had no case for `long`, so
+        // Same class of gap as the decimal case above:
+        // SqlStatementBuilder.FormatSqlLiteral needs a case for `long`; without one,
         // any row with a BIGINT column (added to RowDecoder separately)
         // crashed the entire Undo/Replay generation outright instead of
-        // producing a statement for this one row. Real customer impact:
-        // [LOG].[JobRun]'s bigint JobID identity column.
+        // producing a statement for this one row.
         var row = new Dictionary<string, object?> { ["JobId"] = 5_000_000_000L, ["Status"] = "RUNNING" };
         var evt = new RowEvent("lsn1", RowEventKind.Insert, null, row, null, null, "0001:0F", 1);
 
@@ -135,9 +132,8 @@ public class UndoSqlGeneratorTests
     [Fact]
     public void BoolValue_FormatsAsOneOrZero_NotThrows()
     {
-        // Same class of gap as the decimal/bigint cases above, found via
-        // LogCarverGuard stress testing 2026-10-02: SqlStatementBuilder.
-        // FormatSqlLiteral had no case for `bool`, so any row with a BIT
+        // Same class of gap as the decimal/bigint cases above: SqlStatementBuilder.
+        // FormatSqlLiteral needs a case for `bool`; without one, any row with a BIT
         // column (decoded to C# bool in RowDecoder) crashed undo
         // generation outright with "Cannot format a SQL literal for value
         // of type System.Boolean" - T-SQL has no boolean literal, BIT is
@@ -153,16 +149,13 @@ public class UndoSqlGeneratorTests
     [Fact]
     public void DateTimeValue_FormatsWithFullSubMillisecondPrecision_NotJustMilliseconds()
     {
-        // Real bug, found 2026-10-08 via LogCarverGuard's Rocky9 remote
-        // stress test: a DATETIME2(7) column (SYSDATETIME() almost always
-        // has sub-millisecond precision) formatted to only 3 fractional
-        // digits here meant the undo WHERE clause's literal never equaled
-        // the actual stored value - every single row in a 100,000-row
-        // restore reported a false-positive "data already changed"
-        // conflict and restored 0 rows, even though nothing had actually
-        // changed. .NET DateTime's own tick resolution is 100ns, exactly
-        // DATETIME2(7)'s own max precision, so all 7 fractional digits
-        // must round-trip, not just the first 3.
+        // A DATETIME2(7) column (SYSDATETIME() almost always has sub-millisecond
+        // precision) formatted to only 3 fractional digits would make the undo
+        // WHERE clause's literal never equal the actual stored value - every row
+        // would report a false-positive "data already changed" conflict and
+        // restore 0 rows. .NET DateTime's own tick resolution is 100ns, exactly
+        // DATETIME2(7)'s own max precision, so all 7 fractional digits must
+        // round-trip, not just the first 3.
         //
         // The literal is wrapped in CONVERT(DATETIME2(7), '...') rather
         // than a bare string - see FormatSqlLiteral's own doc comment for
@@ -194,33 +187,24 @@ public class UndoSqlGeneratorTests
     [Fact]
     public void TableNameAlreadyBracketQuoted_IsNotDoubleEscaped()
     {
-        // Regression test for a real bug found via customer testing on
-        // 2026-09-30: the CLI's tableName argument is whatever the caller
-        // typed, and typing "[LOG].[JobRun]" is completely ordinary -
-        // exactly what SSMS's own "Script Table as" produces. Re-escaping
-        // an already-bracketed name without accounting for that doubled
-        // every bracket: EscapeIdentifier turned "[LOG].[JobRun]" into
-        // "[[LOG]]].[[JobRun]]]" - syntactically broken SQL a customer
-        // could not have run as-is.
+        // Regression test: the CLI's tableName argument is whatever the caller
+        // typed, and typing "[ops].[Job]" is completely ordinary - exactly what
+        // SSMS's own "Script Table as" produces. Re-escaping an already-bracketed
+        // name without accounting for that doubled every bracket: EscapeIdentifier
+        // turned "[ops].[Job]" into "[[ops]]].[[Job]]]" - syntactically broken SQL.
         var evt = MakeEvent(RowEventKind.Insert, null, Row(5, "hello", 100));
 
-        var sql = UndoSqlGenerator.Generate(evt, "[LOG].[JobRun]");
+        var sql = UndoSqlGenerator.Generate(evt, "[ops].[Job]");
 
-        Assert.Equal("DELETE FROM [LOG].[JobRun] WHERE [Id] = 5 AND [Note] = N'hello' AND [Amount] = 100;", sql);
+        Assert.Equal("DELETE FROM [ops].[Job] WHERE [Id] = 5 AND [Note] = N'hello' AND [Amount] = 100;", sql);
     }
 
     [Fact]
     public void UpdateOnAnIdentityTable_ExcludesTheIdentityColumnFromSet_ButKeepsItInWhere()
     {
-        // Real bug, found 2026-10-08 via an independent cross-check agent
-        // testing LogCarverGuard against a table using SQL Server's
-        // ordinary default IDENTITY-PK pattern - every test fixture in
-        // this project's own history up to that point happened to use an
-        // explicitly-assigned PK instead, so this was invisible until an
-        // outside tester hit it on the very first try. SQL Server rejects
-        // outright any UPDATE that tries to SET an identity column, even
-        // to its own unchanged value (error 8102) - restore_audit_record
-        // failed 100% of the time on any identity-keyed table as a result.
+        // SQL Server rejects outright any UPDATE that tries to SET an identity
+        // column, even to its own unchanged value (error 8102), so an automated
+        // restore would fail on every identity-keyed table.
         // A row's own identity value can never actually change via UPDATE
         // in the first place, so simply never SETting it loses nothing.
         var evt = MakeEvent(RowEventKind.Update, before: Row(5, "before", 100), after: Row(5, "after", 100));
@@ -309,11 +293,8 @@ public class UndoSqlGeneratorTests
     [Fact]
     public void TinyIntAndSmallIntValues_FormatAsPlainIntegerLiterals()
     {
-        // Same missing-case pattern, found 2026-10-08 via an independent
-        // cross-check agent's FOURTH testing round against the live Rocky9
-        // deployment: TINYINT (System.Byte) and SMALLINT (System.Int16)
-        // are both extremely ordinary column types that had zero undo
-        // capability.
+        // TINYINT (System.Byte) and SMALLINT (System.Int16) are both extremely
+        // ordinary column types that need undo literals too.
         var row = new Dictionary<string, object?> { ["Id"] = 1, ["Tiny"] = (byte)5, ["Small"] = (short)-32768 };
         var evt = new RowEvent("lsn1", RowEventKind.Insert, null, row, null, null, "0001:0F", 1);
 

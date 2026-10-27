@@ -18,7 +18,7 @@ public sealed record TouchedTable(string Schema, string Table, string AllocUnitN
 /// '.' and taking the first two parts works for both shapes without needing
 /// to know ahead of time which one a given AllocUnitName is.
 ///
-/// Dedup note (real bug, found 2026-10-02 via LogCarverGuard stress testing):
+/// Dedup note:
 /// a table with any secondary (non-clustered) index gets its OWN
 /// AllocUnitName for that index's maintenance activity (e.g.
 /// "dbo.Child.IX_Child_ParentId" alongside the table's own
@@ -28,9 +28,8 @@ public sealed record TouchedTable(string Schema, string Table, string AllocUnitN
 /// Table) pair. Without deduping on that pair, a table with any secondary
 /// index gets returned twice, and TransactionUndoAssembler (which loops
 /// over this method's result) re-reads and re-generates undo for that same
-/// table twice, producing duplicate undo entries - confirmed via a FK
-/// cascade delete where the child table had an index on its FK column (an
-/// entirely ordinary schema choice), not a contrived edge case.
+/// table twice, producing duplicate undo entries (for example a FK cascade
+/// delete where the child table has an index on its FK column).
 ///
 /// LSN bounding (added 2026-10-08): unlike FnDblogReader, this query only
 /// asks "which AllocUnitNames did THIS transaction's own row events touch" -

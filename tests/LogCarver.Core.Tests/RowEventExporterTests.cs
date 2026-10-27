@@ -169,7 +169,7 @@ public class RowEventExporterTests
         // Undo/Replay SQL at all, so they never reach this branch) - it's
         // a successfully-decoded value the reconstructor flagged as not
         // fully trustworthy (e.g. LogRecord.PossiblyCorrupted). Without
-        // this line in the exported script, a customer reviewing it would
+        // this line in the exported script, a person reviewing it would
         // have no way to know this specific statement might be wrong.
         var events = new[] { MakeEvent(RowEventKind.Insert, null, Row(5, "hello"), note: "possibly corrupted, verify independently") };
 

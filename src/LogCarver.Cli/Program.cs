@@ -318,10 +318,9 @@ static async Task<int> RunAsync(string server, string database, string tableName
     {
         // Streams directly to the destination instead of building the
         // whole export as one in-memory string first - see
-        // RowEventExporter's class doc comment for why (a real customer
-        // table's full history hit .NET's ~2GB single-object size ceiling
-        // building one giant string, via this same code path in the
-        // sibling LogCarverOffline.Cli). Writing to a real file goes
+        // RowEventExporter's class doc comment for why (one giant string hits
+        // .NET's ~2GB single-object size ceiling on a table with millions of
+        // events). Writing to a real file goes
         // through WriteFileAtomically so a decode error or disk-full
         // partway through never leaves a truncated file at the requested
         // path - streaming loses the old buffer-everything approach's

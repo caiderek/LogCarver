@@ -173,12 +173,11 @@ public class SchemaReaderTests(SqlServerFixture fixture)
     }
 
     /// <summary>
-    /// Regression test for a real bug found 2026-10-02 via LogCarverGuard
-    /// stress testing: a table whose CLUSTERED index is non-unique reserves
+    /// Regression test: a table whose CLUSTERED index is non-unique reserves
     /// a hidden "uniquifier" slot invisible to sys.columns, shifting every
     /// real variable-length column's own LeafOffset label down by one -
-    /// decoding without accounting for this put NVARCHAR columns' bytes one
-    /// slot off from where they belonged (a plausible-looking wrong value,
+    /// decoding without accounting for this puts NVARCHAR columns' bytes one
+    /// slot off from where they belong (a plausible-looking wrong value,
     /// not an honest failure - see ColumnSchema.LeafOffset's doc comment).
     /// </summary>
     [Fact]

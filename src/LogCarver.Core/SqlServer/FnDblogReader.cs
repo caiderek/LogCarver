@@ -8,10 +8,8 @@ namespace LogCarver.Core.SqlServer;
 /// AllocUnitName resolution: fn_dblog's AllocUnitName for a table's own row
 /// storage is "schema.table" for a heap (index_id=0, whose sys.indexes.name
 /// is NULL) or "schema.table.indexname" for a clustered index (index_id=1).
-/// This used to be *guessed* from the table name alone via a LIKE prefix
-/// ("dbo.LogTest.%") - which works for a clustered table with no other
-/// indexes, but two real bugs came from that guess, both found via CLI
-/// testing against SQL Server 2019 on 2026-09-28:
+/// The name is resolved from sys.indexes rather than guessed from the table name
+/// alone via a LIKE prefix ("dbo.LogTest.%"), which goes wrong in two ways:
 ///   1. A heap table's AllocUnitName has no index name to append, so it
 ///      never matched the "table.%" prefix pattern at all - every heap
 ///      table silently returned zero records.
@@ -25,24 +23,14 @@ namespace LogCarver.Core.SqlServer;
 /// first and matching fn_dblog by exact equality against that one
 /// constructed string eliminates both: no pattern, nothing to guess wrong.
 ///
-/// Bracket bug (found via real customer testing, 2026-09-30): the
-/// constructed string used to be built from the CALLER's own tableName
-/// argument (e.g. "[LOG].[JobRun]", exactly how someone typing a
-/// schema-qualified name naturally would, especially copy-pasted from
-/// SSMS's own "Script Table as" output) - but fn_dblog's AllocUnitName is
-/// never bracket-quoted ("LOG.JobRun.PK_LOG_JobRun"). Comparing
-/// "[LOG].[JobRun].PK_LOG_JobRun" against that never matches, silently
-/// returning zero rows for every real event - the exact wrong-diagnosis
-/// failure mode this tool exists to avoid (it printed "fn_dblog found
-/// nothing... may have rotated past" and pointed at LogCarverOffline,
-/// when the data was sitting right there in the still-active log).
-/// OBJECT_ID(@tableName) itself tolerates brackets/quoting/case fine, so
-/// schema/DDL/compression lookups elsewhere never showed a symptom - only
-/// this string-concatenation site did. Fixed by asking SQL Server for the
-/// canonical, always-unbracketed schema/table name via
-/// OBJECT_SCHEMA_NAME/OBJECT_NAME instead of reusing the caller's raw
-/// input text, so any valid way of typing the same object (bracketed,
-/// quoted, mixed case) resolves to the one string fn_dblog actually uses.
+/// Bracket handling: fn_dblog's AllocUnitName is never bracket-quoted
+/// ("schema.table.index"), while a caller may type "[schema].[table]" (as
+/// SSMS's "Script Table as" output does). Comparing the bracketed text against
+/// it would never match and silently return zero rows. OBJECT_ID(@tableName)
+/// tolerates brackets, quoting and case, so the canonical, always-unbracketed
+/// schema/table name is asked for via OBJECT_SCHEMA_NAME/OBJECT_NAME instead
+/// of reusing the caller's raw input text: any valid way of typing the same
+/// object resolves to the one string fn_dblog actually uses.
 ///
 /// Context filter: a clustered-index table's INSERT/UPDATE use
 /// Context='LCX_CLUSTERED', but DELETE uses 'LCX_MARK_AS_GHOST' (SQL
@@ -56,13 +44,11 @@ namespace LogCarver.Core.SqlServer;
 /// yet overwritten requires reading the LDF file directly and is not
 /// implemented here.
 ///
-/// LSN upper-bounding (added 2026-10-08, see LogCarverGuard's own status
-/// notes for the full incident): a real deployment hit 30+ minutes and
-/// multi-GB memory for a single UPDATE's undo generation because every
-/// fn_dblog call here scanned the database's ENTIRE active log, not just
-/// the range relevant to the one transaction being undone - fn_dblog's
-/// second positional parameter is a perfectly real end-LSN bound, it was
-/// simply never passed. <paramref name="commitLsn"/> lets a caller supply
+/// LSN upper-bounding: scanning the database's ENTIRE active log on every
+/// fn_dblog call is slow and memory-hungry for a single UPDATE's undo
+/// generation, so only the range relevant to one transaction should be
+/// read. fn_dblog's second positional parameter is an end-LSN bound.
+/// <paramref name="commitLsn"/> lets a caller supply
 /// "don't read past this transaction's own commit" - safe because nothing
 /// at or after a transaction's commit LSN can be part of ITS before/after
 /// image. Deliberately NOT given a lower bound too: an UPDATE's
@@ -131,12 +117,8 @@ public static class FnDblogReader
         await using var command = new SqlCommand(Sql, connection);
         // fn_dblog(NULL, NULL) scans the whole active log, not just this
         // table's rows - on a database with a large active log this can
-        // genuinely take well over the ADO.NET default 30s (confirmed
-        // 2026-10-04 stress-testing LogCarverGuard's native install: a
-        // 5-table FK cascade's undo generation took 1m46s total across
-        // several of these scans). 30s was timing this out even when the
-        // scan would have completed in well under two minutes - raised so
-        // a genuinely slow-but-finishable scan doesn't get timeout the same
+        // genuinely take well over the ADO.NET default 30s, so the timeout is
+        // raised: a genuinely slow-but-finishable scan should not get timed out the same
         // as a truly stuck one. Passing commitLsn (see this method's own
         // doc comment) shrinks the scanned range in the first place, so
         // this timeout is now a backstop for the unbounded/legacy case,

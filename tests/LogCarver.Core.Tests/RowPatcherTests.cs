@@ -4,8 +4,8 @@ using Xunit;
 namespace LogCarver.Core.Tests;
 
 /// <summary>
-/// All hex here was captured fresh from fn_dblog against LPT_FullBak.dbo.LogTest
-/// during this session (not reused/guessed), matching a schema captured
+/// All hex here was captured from fn_dblog against a real test table (dbo.LogTest),
+/// not reused/guessed, matching a schema captured
 /// before the ADD COLUMN DDL that appears elsewhere in that same table's
 /// history (see SchemaDriftTests) - this schema is what those specific
 /// rows actually had at write time.

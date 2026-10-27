@@ -4,8 +4,8 @@ namespace LogCarver.Core.SqlServer;
 
 /// <summary>
 /// Reads a table's physical row layout from sys.system_internals_partition_columns
-/// (undocumented, but this is exactly the metadata RowDecoder needs - see
-/// CLAUDE.md and 研究紀錄 第八節 for why this beats hardcoding a type map).
+/// (undocumented, but this is exactly the metadata RowDecoder needs; it beats
+/// hardcoding a type map).
 ///
 /// index_id filter: a table can have more than one row in sys.partitions -
 /// index_id=0/1 for its own heap/clustered-index storage, plus one more
@@ -37,9 +37,9 @@ namespace LogCarver.Core.SqlServer;
 /// partition's differently-shaped rows, an even quieter version of the
 /// exact bug this fix closes. Two rows for the same ColumnId that
 /// disagree on anything decode-relevant throw rather than pick one
-/// arbitrarily. LogCarverOffline's CaptureMetadata already refuses any
-/// compressed table outright (a blunter, already-existing gate this one
-/// backs up); the public/online LogCarver.Cli currently only warns on
+/// arbitrarily. The offline capture path refuses any
+/// compressed table outright (a blunter gate this one backs up); the online
+/// LogCarver.Cli currently only warns on
 /// compression and continues, so this is this path's only real protection
 /// against mixed per-partition compression.
 ///

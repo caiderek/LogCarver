@@ -18,16 +18,12 @@ public sealed record DdlBoundary(string Lsn, string? TransactionName, string Tra
 /// zero boundaries for ADD COLUMN and silently defeats the guard.
 ///
 /// hobt_id, index_id, and partitioning: sys.partitions has one row per
-/// (index, partition) - the old query here had no index_id filter at all,
-/// so any table with a secondary index (extremely common - not limited to
-/// partitioned tables) could pick that index's own hobt_id instead of the
-/// table's own heap/clustered one via ExecuteScalar's arbitrary "whichever
-/// row came back first, no ORDER BY" behavior, silently matching DDL
-/// against the wrong rowset and finding zero boundaries where real ones
-/// exist. A partitioned table compounds this: even after filtering to
-/// index_id IN (0,1) (same fix SchemaReader already applies), a table with
-/// N partitions still has N distinct hobt_ids, one per partition, and a
-/// schema-changing DDL only needs to touch ONE partition's hobt to be a
+/// (index, partition), so the lookup filters to index_id IN (0,1) (the table's
+/// own heap or clustered index, as SchemaReader does); without that filter a
+/// table with a secondary index could match that index's own hobt_id and find
+/// zero boundaries where real ones exist. A table with N partitions has N
+/// distinct hobt_ids, one per partition, and a schema-changing DDL only needs
+/// to touch ONE partition's hobt to be a
 /// real boundary. GetDdlBoundariesAsync now collects every hobt_id for the
 /// table and unions the boundaries found under each, so a DDL affecting
 /// any partition is caught, not just whichever one happened to be first.
@@ -75,16 +71,10 @@ public static class DdlBoundaryReader
         // every partition at once) would otherwise show up once per
         // matching hobt_id.
         //
-        // TODO (noted, not fixed - correctness over performance for now):
-        // this re-scans the entire active log (BoundarySql's two
+        // Limitation: this re-scans the entire active log (BoundarySql's two
         // fn_dblog(NULL,NULL) passes) once per hobt_id, i.e. once per
-        // partition for a partitioned table. Fine for the common case, but
-        // scales linearly with partition count - a table with hundreds of
-        // (e.g. date-)partitions would do hundreds of full scans. A single-
-        // scan version is possible: pull every LOP_HOBT_DDL row once,
-        // parse "rowset <id>." out of Description client-side, filter
-        // against a HashSet of hobtIds, then do one LOP_BEGIN_XACT join on
-        // the surviving transaction IDs.
+        // partition for a partitioned table, so the cost grows linearly with
+        // the partition count.
         var byLsn = new Dictionary<string, DdlBoundary>();
         foreach (long hobtId in hobtIds)
         {

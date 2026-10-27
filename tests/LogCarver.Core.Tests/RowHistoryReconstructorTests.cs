@@ -163,7 +163,7 @@ public class RowHistoryReconstructorTests
     {
         // LogRecord.PossiblyCorrupted (set by an offline reader when a
         // record's bytes crossed a physical artifact it detected but
-        // can't repair - see LogCarverOffline's PartitionScanner) must not
+        // can't repair) must not
         // block decoding: the values may well be exactly right, this is
         // an honesty flag, not a refusal.
         LogRecord[] records = [Insert("00000001", "0001:0F", 3, InsertRow, possiblyCorrupted: true)];

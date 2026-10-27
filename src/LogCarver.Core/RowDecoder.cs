@@ -197,9 +197,9 @@ public static class RowDecoder
         // for TypeInt/TypeBigInt (BitConverter never throws on any bit
         // pattern) but not for TypeDateTime2: DecodeDateTime2 calls
         // DateTime.AddDays on whatever day-count the garbage bytes happen
-        // to contain, which threw ArgumentOutOfRangeException for a real
-        // NULL EndTime column ([LOG].[JobRun]) whose reserved bytes decoded
-        // to a day count outside DateTime's valid range - crashing the
+        // to contain, which throws ArgumentOutOfRangeException for a NULL
+        // column whose reserved bytes decode to a day count outside
+        // DateTime's valid range - crashing the
         // entire row (every other column lost too) before the null
         // overwrite below ever ran. Checking null first and skipping the
         // decode switch entirely for a NULL column closes this for every
@@ -373,19 +373,14 @@ public static class RowDecoder
                         // verified against real captured INSERT/UPDATE rows.
                         //
                         // Flagged as possibly-corrupted too: this placeholder
-                        // string is meant to be caught by a HUMAN reviewing
-                        // generated --undo/--export SQL text before running
-                        // it (see
-                        // UndoSqlGenerator's own doc comment - "LogCarver
-                        // never executes anything itself"). LogCarverGuard's
-                        // restore_audit_record has no human in the loop at
-                        // all, so without this flag it silently executed an
-                        // UPDATE/INSERT embedding this literal placeholder
-                        // text as if it were real data, overwriting the
-                        // column's actual ~4000-character content with the
-                        // 28-character string "<off-row value, not
-                        // decoded>" and reporting RESTORED - worse than
-                        // simply failing to restore, actual data loss.
+                        // string is only meant to be caught by a HUMAN reviewing
+                        // generated --undo/--export SQL text before running it
+                        // (see UndoSqlGenerator's own doc comment - "LogCarver
+                        // never executes anything itself"). An automated caller
+                        // with no human in the loop would otherwise execute an
+                        // UPDATE/INSERT embedding the literal text "<off-row value,
+                        // not decoded>" as if it were real data, overwriting the
+                        // column's actual content - worse than failing to restore.
                         // Flagging it here makes UndoSqlGenerator refuse to
                         // generate undo for the whole row (see its own doc
                         // comment), matching the already-existing out-of-
@@ -447,7 +442,7 @@ public static class RowDecoder
         {
             // No variable-length section at all: every variable column is
             // either NULL or an empty string, and only the null bitmap says
-            // which. These used to be left out of the result entirely.
+            // which. They are part of the result too.
             foreach (var varCol in schema.Where(c => c.LeafOffset < 0))
             {
                 if (varCol.Name == ColumnSchema.ReservedUniquifierSlotName)
@@ -553,15 +548,9 @@ public static class RowDecoder
     /// DATE/DecodeDate use. Verified byte-for-byte against a real SQL
     /// Server instance at every scale 0-7 (e.g. scale 1's stored 452961
     /// means 45296.1s = 12:34:56.1; scale 7's stored 452961234567 means
-    /// 45296.1234567s = 12:34:56.1234567) - previously only scale 3/4 (both
-    /// sharing the 4-byte time width) had been checked, and only scale 3
-    /// happened to be correct by coincidence of matching plain milliseconds.
-    /// Real customer impact: DATETIME2 columns declared with no explicit
-    /// scale default to DATETIME2(7) (8-byte storage, 5-byte time part) -
-    /// e.g. DECISION.StockDecisionDaily.CreateDate - which this decoder
-    /// used to refuse outright (`NotSupportedException`), taking the whole
-    /// row down via RowHistoryReconstructor.TryDecode regardless of any
-    /// other column's decodability.
+    /// 45296.1234567s = 12:34:56.1234567). DATETIME2 columns declared with no
+    /// explicit scale default to DATETIME2(7) (8-byte storage, 5-byte time
+    /// part), so that width must decode too.
     /// </summary>
     private static DateTime DecodeDateTime2(ReadOnlySpan<byte> row, int offset, int length, int scale)
     {
@@ -589,10 +578,9 @@ public static class RowDecoder
             // decoded using the current (wrong) scale's tick unit -
             // exactly the silent off-by-a-power-of-10 bug this function
             // exists to prevent, just reachable through stale schema
-            // metadata instead of a decode-logic gap. Not guarded against;
-            // would need the same DDL-boundary-LSN mechanism callers use
-            // for added/dropped columns, extended to cover ALTER COLUMN's
-            // precision changes specifically - not yet built.
+            // metadata instead of a decode-logic gap. Not guarded against:
+            // the DDL-boundary-LSN mechanism callers use for added/dropped
+            // columns does not cover ALTER COLUMN's precision changes.
             throw new NotSupportedException(
                 $"DATETIME2 storage length {length} doesn't match scale {scale}'s expected time-part width ({expectedTimeLen} bytes); refusing to decode.");
         }

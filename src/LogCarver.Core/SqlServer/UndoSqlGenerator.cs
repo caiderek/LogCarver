@@ -28,14 +28,9 @@ public static class UndoSqlGenerator
     /// this is output for a human to review before running (see this
     /// class's own doc comment), and the CLI's existing "print a NEEDS
     /// MANUAL REVIEW comment above the SQL, let the human judge it" design
-    /// already handles that review. An AUTOMATED caller (LogCarverGuard's
-    /// restore_audit_record, which has no human in the loop at all) must
-    /// not reuse this best-effort text as-is - see
-    /// TransactionUndoAssembler.ProcessTableAsync in LogCarverGuard.Core,
-    /// which is where that stricter refusal actually belongs (found for
-    /// real 2026-10-08: an automated caller blindly executing this exact
-    /// kind of best-effort SQL overwrote a column's real ~4000-character
-    /// content with a 28-character placeholder and reported success).
+    /// already handles that review. An AUTOMATED caller with no human in the loop
+    /// must not reuse this best-effort text as-is: it should refuse instead of
+    /// executing SQL that may embed a placeholder in place of real data.
     /// </remarks>
     /// <param name="keyColumns">
     /// The table's primary (or unique clustered) key columns, if known. With

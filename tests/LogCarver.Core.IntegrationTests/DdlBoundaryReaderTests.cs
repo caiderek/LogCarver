@@ -104,8 +104,7 @@ public class DdlBoundaryReaderTests(SqlServerFixture fixture)
     /// instead of trusting ExecuteScalar's unspecified row order) remains
     /// unambiguously more correct regardless; this test positively confirms
     /// the fixed code still returns the right answer for this scenario,
-    /// same as the SchemaReader tests above, even though it doesn't
-    /// (here) also prove the old code was wrong.
+    /// same as the SchemaReader tests above.
     /// </summary>
     [Fact]
     public async Task GetDdlBoundariesAsync_OnAPartitionedTable_DetectsDdlThatOnlyTouchedOnePartitionsHobt()

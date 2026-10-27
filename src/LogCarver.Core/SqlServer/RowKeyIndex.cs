@@ -41,7 +41,7 @@ public sealed class RowKeyIndex
     {
         string? hash = RowIdentity.KeyHash(RowIdentity.LockInformation(record));
 
-        // An INSERT is a new row at that slot; the row that used to be there
+        // An INSERT is a new row at that slot; the row previously at that slot
         // is about to be pushed along, it is not this one.
         if (record.Operation == "LOP_INSERT_ROWS")
         {

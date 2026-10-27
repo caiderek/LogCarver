@@ -149,20 +149,17 @@ public class FnDblogReaderTests(SqlServerFixture fixture)
     }
 
     /// <summary>
-    /// Regression test for the bug found during real customer testing on
-    /// 2026-09-30: ResolveOwnAllocUnitNameAsync used to build its fn_dblog
+    /// Regression test: ResolveOwnAllocUnitNameAsync must not build its fn_dblog
     /// match string from the caller's raw tableName text. Typing the table
     /// bracket-quoted - "[dbo].[TestTable]", exactly what SSMS's own
     /// "Script Table as" output produces, and a completely ordinary way to
-    /// type a schema-qualified name - built "[dbo].[TestTable]" as the
+    /// type a schema-qualified name - would give "[dbo].[TestTable]" as the
     /// match string, but fn_dblog's real AllocUnitName is never bracketed
-    /// ("dbo.TestTable"), so the comparison never matched and every event
-    /// silently vanished. This was misdiagnosed in production as "fn_dblog
-    /// already rotated past this data" - the actual message this CLI prints
-    /// on zero results - when the data was sitting in the still-active log
-    /// the whole time. OBJECT_ID(@tableName) tolerates brackets fine, so
-    /// nothing about schema/DDL lookups elsewhere showed a symptom - only
-    /// this one string-concatenation site did.
+    /// ("dbo.TestTable"), so the comparison would never match and every event
+    /// would silently vanish, which the CLI reports as "fn_dblog already rotated
+    /// past this data" even though the data is still in the active log.
+    /// OBJECT_ID(@tableName) tolerates brackets fine, so schema/DDL lookups
+    /// elsewhere are not affected - only this string-concatenation site.
     /// </summary>
     [Fact]
     public async Task ReadClusteredRecordsAsync_WithBracketQuotedTableName_StillMatches()

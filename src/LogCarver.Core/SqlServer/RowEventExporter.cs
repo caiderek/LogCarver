@@ -15,15 +15,11 @@ namespace LogCarver.Core.SqlServer;
 /// once. The To* methods are thin StringWriter-backed wrappers kept for
 /// tests and other small-scale/in-memory callers (e.g. an HTTP response
 /// body) - do NOT use them against a real multi-million-row table export.
-/// Confirmed via a real customer table (DECISION.StockDecisionDaily,
-/// ~1.59M events, --undo --replay --export sql): building the entire
-/// output as one string/StringBuilder before writing it out threw
-/// "Insufficient memory to continue the execution of the program" on a
-/// 32GB machine with ~16GB free - very likely hitting .NET's ~2GB
-/// single-object/array size ceiling on the final string, not a true
-/// system-memory shortage (a List of ~1.59M RowEvent/LogRecord objects,
-/// while large, isn't one contiguous multi-GB array the way a giant string
-/// or StringBuilder's internal buffer is).
+/// Building the entire output as one string/StringBuilder before writing it
+/// out can fail with "Insufficient memory to continue the execution of the
+/// program" on a table with millions of events: .NET caps a single
+/// object/array at ~2GB, which a giant string or StringBuilder's internal
+/// buffer reaches long before system memory runs out.
 /// </summary>
 public static class RowEventExporter
 {
@@ -81,8 +77,8 @@ public static class RowEventExporter
         if (includeUndoSql) header.Add("UndoSql");
         if (includeReplaySql) header.Add("ReplaySql");
         // Appended last, after every pre-existing column, not inserted
-        // after Kind - this format already ships to paying customers, and
-        // a customer/script reading columns by position (rather than by
+        // after Kind - this format is consumed by scripts, and a script reading
+        // columns by position (rather than by
         // header name) would silently misread every column if a new one
         // were spliced into the middle. Appending only adds a column past
         // whatever a positional reader already expects; it never shifts
@@ -154,7 +150,7 @@ public static class RowEventExporter
             // detected-but-unrepairable physical artifact - see LogRecord's
             // PossiblyCorruptedOffsetsInRowLogContents0/1 doc comment).
             // The "NEEDS MANUAL REVIEW" prefix (not just "NOTE") is
-            // deliberate: a customer skimming a multi-thousand-line script
+            // deliberate: a person skimming a multi-thousand-line script
             // for comment lines should be able to tell at a glance which
             // ones mean "just FYI" and which mean "verify this statement
             // before running it" - e.Note is only ever non-null for the
@@ -205,9 +201,9 @@ public static class RowEventExporter
 
     /// <summary>
     /// Built with System.Text.Json.Nodes (JsonObject/JsonValue) rather than
-    /// JsonSerializer.Serialize&lt;T&gt; against a POCO - LogCarverOffline.Cli
-    /// is PublishAot, which disables the reflection-based serializer this
-    /// method used to rely on, and the row values here are a bag of
+    /// JsonSerializer.Serialize&lt;T&gt; against a POCO - an AOT-published
+    /// program (PublishAot) cannot use the reflection-based serializer, and
+    /// the row values here are a bag of
     /// `object?` with no fixed shape a source-generated JsonSerializerContext
     /// could describe. JsonNode's own writer is hand-coded, not reflection,
     /// so it works under AOT.

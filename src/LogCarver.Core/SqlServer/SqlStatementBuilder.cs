@@ -8,12 +8,7 @@ namespace LogCarver.Core.SqlServer;
 /// before -&gt; after), so the statement-building and literal-formatting
 /// logic lives here once instead of twice.
 ///
-/// IDENTITY columns (found for real 2026-10-08, via an independent
-/// cross-check agent testing LogCarverGuard against a table using SQL
-/// Server's ordinary default IDENTITY-PK pattern - every one of this
-/// project's own test fixtures up to that point happened to use an
-/// explicitly-assigned PK instead, so this was invisible until an outside
-/// tester hit it on the very first try): SQL Server rejects outright any
+/// IDENTITY columns: SQL Server rejects outright any
 /// UPDATE that tries to SET an identity column, even to its own current
 /// value (error 8102) - and separately rejects an INSERT that names an
 /// identity column in its column list unless IDENTITY_INSERT is ON for
@@ -122,8 +117,7 @@ internal static class SqlStatementBuilder
     // "[dbo].[Orders]" is completely ordinary (it's exactly what SSMS's own
     // "Script Table as" produces). Re-escaping an already-bracketed part
     // without accounting for that doubled every bracket - "[dbo].[Orders]"
-    // came out as "[[dbo]]].[[Orders]]]", found via real customer testing
-    // 2026-09-30. Stripping one pre-existing layer of brackets (and
+    // came out as "[[dbo]]].[[Orders]]]". Stripping one pre-existing layer of brackets (and
     // reversing their "]]" -> "]" escaping) before re-escaping makes this
     // idempotent: an already-bracketed part round-trips to the same
     // brackets, and an unbracketed part is escaped exactly as before.
@@ -140,21 +134,17 @@ internal static class SqlStatementBuilder
     {
         null => "NULL",
         int i => i.ToString(),
-        // Added alongside BIGINT column decoding in RowDecoder - missed
-        // here would repeat exactly the DECIMAL/NUMERIC gap above: a real
-        // customer table ([LOG].[JobRun]'s bigint JobID) hitting the
-        // NotSupportedException below outright crashes the whole
-        // --undo/--replay/--export sql run, losing every other row too.
+        // BIGINT columns: without this case a bigint value would hit the
+        // NotSupportedException below and crash the whole --undo/--replay/
+        // --export sql run, losing every other row too.
         long l => l.ToString(),
-        // Found 2026-10-08 via LogCarverGuard's Rocky9 stress test: a
-        // DATETIME2(7)-precision column (SYSDATETIME() has sub-millisecond
-        // precision almost every time) formatted to only 3 fractional
-        // digits here means the undo WHERE clause's literal never equals
-        // the real stored value - every single row misses the match and
-        // UndoSqlGenerator's optimistic-concurrency guard false-positives
-        // as "the data changed", when it never did. .NET DateTime's own
-        // tick resolution is 100ns, exactly DATETIME2(7)'s own max
-        // precision, so 7 fractional digits round-trips losslessly.
+        // A DATETIME2(7) column (SYSDATETIME() has sub-millisecond precision almost
+        // every time) formatted to only 3 fractional digits would make the undo
+        // WHERE clause's literal never equal the real stored value - every row
+        // misses the match and UndoSqlGenerator's optimistic-concurrency guard
+        // false-positives as "the data changed". .NET DateTime's own tick
+        // resolution is 100ns, exactly DATETIME2(7)'s max precision, so 7
+        // fractional digits round-trips losslessly.
         //
         // Real regression in that same fix, found 2026-10-08 via an
         // independent cross-check agent's second testing round, within
@@ -184,13 +174,10 @@ internal static class SqlStatementBuilder
         // decimal.ToString() never uses scientific notation (unlike
         // double/float), so this always produces a plain SQL Server
         // decimal/numeric literal - InvariantCulture avoids a comma
-        // decimal separator on a non-US locale. Added alongside DECIMAL/
-        // NUMERIC column decoding in RowDecoder; missed here until a real
-        // customer table (DECISION.StockDecisionDaily's ConfidenceScore/
-        // EvidenceCompleteness/TargetPrice) crashed the whole
-        // --undo/--replay/--export sql run outright with "Cannot format a
-        // SQL literal for value of type System.Decimal" - every other
-        // column in every other row was lost too, not just this value.
+        // decimal separator on a non-US locale. Without this case a decimal/numeric
+        // value would crash the whole --undo/--replay/--export sql run with
+        // "Cannot format a SQL literal for value of type System.Decimal" - every
+        // other column in every other row would be lost too, not just this value.
         decimal m => m.ToString(System.Globalization.CultureInfo.InvariantCulture),
         // HighPrecisionDecimal.ToString() already produces a plain decimal
         // literal (no scientific notation) - see that type's own doc
@@ -215,22 +202,12 @@ internal static class SqlStatementBuilder
         // tables had zero undo capability, full stop.
         Guid g => $"'{g}'",
         // T-SQL has no boolean literal - BIT columns are written/compared
-        // as 1/0. Same missing-case pattern as bigint/decimal above: found
-        // 2026-10-02 via LogCarverGuard stress testing against a BIT
-        // column, where it crashed undo generation outright with this same
-        // NotSupportedException (caught further up the stack now, so it no
-        // longer loses the whole audit record - see GuardedSqlExecutor's
-        // UndoGenerationError - but the underlying gap is still real and
-        // worth fixing at the source).
+        // as 1/0. Without this case a BIT column would crash undo generation with
+        // this same NotSupportedException.
         bool b => b ? "1" : "0",
-        // Same missing-case pattern as every entry above, found 2026-10-08
-        // via an independent cross-check agent's FOURTH testing round
-        // against the live Rocky9 deployment: TINYINT (System.Byte) and
-        // SMALLINT (System.Int16) are both extremely ordinary column types
-        // (flags, status codes, small counters) that had zero undo
-        // capability - caught safely by GuardedSqlExecutor's existing
-        // UndoGenerationError handling, not a crash, but the underlying
-        // gap was real.
+        // TINYINT (System.Byte) and SMALLINT (System.Int16) are both extremely
+        // ordinary column types (flags, status codes, small counters) and need an
+        // undo literal too.
         byte tiny => tiny.ToString(),
         short small => small.ToString(),
         // Same round: VARBINARY/BINARY decode to a bare byte[] (see

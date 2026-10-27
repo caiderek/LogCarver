@@ -53,8 +53,7 @@ public class RowDecoderTests
     ];
 
     // dbo.Dt2ScaleTest: Id INT, D0 DATETIME2(0), D7 DATETIME2(7), D7default DATETIME2
-    // (no explicit scale declared, which defaults to DATETIME2(7) - the real
-    // shape of DECISION.StockDecisionDaily.CreateDate).
+    // (no explicit scale declared, which defaults to DATETIME2(7)).
     private static readonly IReadOnlyList<ColumnSchema> Dt2ScaleTestSchema =
     [
         new ColumnSchema("Id", 1, LeafOffset: 4, LeafNullBit: 1, MaxLength: 4, SystemTypeId: 56),
@@ -88,13 +87,12 @@ public class RowDecoderTests
 
     // dbo.Simple2: Id INT (PK NONCLUSTERED), ColA NVARCHAR(20) NOT NULL,
     // Sortable DATETIME2 (CLUSTERED, non-unique), ColB NVARCHAR(20) NULL.
-    // Real bug found 2026-10-02 via LogCarverGuard stress testing: a
-    // non-unique clustered index reserves variable-length slot -1 (and
+    // A non-unique clustered index reserves variable-length slot -1 (and
     // null-bitmap bit 1) for SQL Server's hidden uniquifier column, so
     // ColA/ColB's own real labels start at -2/-3, not -1/-2 - decoding
     // without the synthetic ReservedUniquifierSlotName entry SchemaReader
-    // now injects put each NVARCHAR's bytes one slot off from where they
-    // belonged (ColA decoded as "" instead of its real value).
+    // injects would put each NVARCHAR's bytes one slot off from where they
+    // belong (ColA decoded as "" instead of its real value).
     private static readonly IReadOnlyList<ColumnSchema> NonUniqueClusteredSchema =
     [
         new ColumnSchema(ColumnSchema.ReservedUniquifierSlotName, -1, LeafOffset: -1, LeafNullBit: 1, MaxLength: 0, SystemTypeId: 0),
@@ -226,7 +224,7 @@ public class RowDecoderTests
     public void Decode_RowWithNoVariableSection_AllEmptyStringsAreEmptyNotMissing()
     {
         // Both variable columns are '' so the row has no variable section at
-        // all (status byte has no 0x20); they used to be absent from the result.
+        // all (status byte has no 0x20); they must be present, as empty strings.
         var result = RowDecoder.Decode(Convert.FromHexString("1000080003000000030000"), EmptyVsNullSchema);
 
         Assert.Equal(3, result["Id"]);
@@ -290,8 +288,7 @@ public class RowDecoderTests
         // Synthetic row (not captured from a real instance): Id=42, D=2026-01-15.
         // DATE (system_type_id 40) was entirely unimplemented until this test -
         // every row from a table with a DATE column failed to decode at all
-        // (real customer impact: StockDecisionDaily/StockPriceDaily-style
-        // tables with a plain date column), which in turn made
+        // (a table with a plain date column), which in turn made
         // RowEventExporter.ToSql silently produce an empty file for every
         // event in such a table since UndoSqlGenerator/ReplaySqlGenerator
         // both require a non-null Before/After image to work from.
@@ -315,11 +312,7 @@ public class RowDecoderTests
         // VALUES (1, 123.45, 123456789012.3456), against a real SQL Server
         // instance. DECIMAL/NUMERIC (system_type_id 106/108) was entirely
         // unimplemented until this test - every row from a table with any
-        // decimal/numeric column failed to decode at all (real customer
-        // impact: DECISION.StockDecisionDaily's ConfidenceScore/
-        // EvidenceCompleteness/TargetPrice columns, found the same day as
-        // the DATE gap above - fixing DATE alone was not enough for that
-        // table).
+        // decimal/numeric column failed to decode at all.
         byte[] row = Convert.FromHexString(
             "1000160001000000013930000001C0BA8A3CD5620400030000");
 
@@ -365,11 +358,9 @@ public class RowDecoderTests
         // computed a length that ran past the end of the row and threw,
         // which the outer catch in Decode wrapped as
         // UnsupportedRowFormatException and discarded the ENTIRE row -
-        // including the perfectly decodable Id column. Real customer
-        // impact: DECISION.StockDecisionDaily's free-text reason/note
-        // columns (nvarchar(max)) caused every single row to be silently
-        // dropped from Undo/Replay/SQL export (matched 1589601 events, 0
-        // bytes of output).
+        // including the perfectly decodable Id column. A table with nvarchar(max)
+        // columns would have every single row silently dropped from
+        // Undo/Replay/SQL export.
         byte[] row = Convert.FromHexString(
             "30000800010000000200BC01001F8000009165000000008802000001000000");
 
@@ -445,8 +436,7 @@ public class RowDecoderTests
         // Before this fix, any DATETIME2 column at its default scale (no
         // explicit precision - very common in real schemas) refused to
         // decode at all, taking the whole row down via
-        // RowHistoryReconstructor.TryDecode. Real customer impact:
-        // DECISION.StockDecisionDaily.CreateDate is exactly this shape.
+        // RowHistoryReconstructor.TryDecode.
         byte[] row = Convert.FromHexString(
             "10001E0001000000F0B000304A0B87EE977669304A0B87EE977669304A0B040000");
 
@@ -466,8 +456,8 @@ public class RowDecoderTests
         // '...56.12345', '...56.123456'). D3 and D4 share the same 4-byte
         // time-part storage width but NOT the same tick unit (D3's raw value
         // happens to equal plain milliseconds; D4's does not - 0.1ms units)
-        // - this is the specific case the old code got wrong by assuming
-        // "4-byte time part" always meant milliseconds.
+        // - this is the specific case where assuming
+        // "4-byte time part" always means milliseconds would be wrong.
         byte[] row = Convert.FromHexString(
             "10002C000100000061E906304A0BFB29B302304A0BD2A3FF1A304A0B3966FC0D01304A0B40FEDB8B0A304A0B060000");
 
@@ -553,10 +543,9 @@ public class RowDecoderTests
     public void Decode_OffsetOverlappingAVariableColumnsOffsetArrayEntry_FlagsThatColumn()
     {
         // Byte 24 is Note's own 2-byte cumulative-offset entry, not its
-        // data - this is the exact mechanism of the real bug this feature
-        // exists for (DECISION.StockDecisionDaily.DecisionFlag: the
-        // ENTRY, not the character data, was the corrupted byte - see
-        // research_notes.md). The entry's actual value here is fine (this
+        // data - this is the mechanism this feature exists for (the
+        // ENTRY, not the character data, is the corrupted byte).
+        // The entry's actual value here is fine (this
         // is a synthetic offset choice against real row bytes, not a real
         // corrupted record), so the decoded value is still correct - the
         // point is that this position is treated as belonging to Note.
@@ -647,9 +636,8 @@ public class RowDecoderTests
         Assert.Equal(["Id"], corrupted);
     }
 
-    // Regression test for a real gap found via customer testing on
-    // 2026-09-30: a bigint column (system_type_id 127, e.g. an IDENTITY
-    // primary key like [LOG].[JobRun]'s JobID) hit the "not implemented
+    // Regression test: a bigint column (system_type_id 127, e.g. an IDENTITY
+    // primary key) must not hit the "not implemented
     // yet" NotSupportedException, which discards the entire row - every
     // other column lost too, not just this one - exactly the failure mode
     // this decoder exists to avoid for a type this common.
@@ -673,13 +661,10 @@ public class RowDecoderTests
         Assert.Equal(5_000_000_000L, result["JobId"]);
     }
 
-    // dbo/[LOG].[JobRun]: JobID BIGINT, JobName VARCHAR(100), StartTime
+    // dbo.Jobs: JobID BIGINT, JobName VARCHAR(100), StartTime
     // DATETIME2(7), EndTime DATETIME2(7) NULL, Status VARCHAR(20),
-    // CreateDate DATETIME2(7). Real RowLog Contents 0 captured against a
-    // real customer's SQL Server for an INSERT of (1, "1", 2026-09-09
-    // 00:00:00.0000000, NULL, "RUNNING", 2026-09-30 20:19:45.3810173),
-    // cross-checked byte-for-byte by hand before being used as this
-    // regression's ground truth.
+    // CreateDate DATETIME2(7). RowLog Contents 0 captured from SQL Server for an
+    // INSERT with a NULL EndTime, checked byte for byte against the row's values.
     private static readonly IReadOnlyList<ColumnSchema> JobRunSchema =
     [
         new ColumnSchema("JobID", 1, LeafOffset: 4, LeafNullBit: 1, MaxLength: 8, SystemTypeId: 127),
@@ -693,20 +678,17 @@ public class RowDecoderTests
     [Fact]
     public void Decode_NullDateTime2FixedColumn_DoesNotCrashTheWholeRow()
     {
-        // Regression test for a real gap found via customer testing on
-        // 2026-09-30, immediately after the BigInt fix above let decoding
-        // get this far: a NULL fixed-length column's reserved bytes used
-        // to be decoded unconditionally (then overwritten with null
+        // Regression test: a NULL fixed-length column's reserved bytes must not
+        // be decoded unconditionally (then overwritten with null
         // afterward) - harmless for TypeInt/TypeBigInt (BitConverter never
         // throws on any bit pattern), but DecodeDateTime2 calls
         // DateTime.AddDays on whatever day-count those reserved bytes
         // happen to contain. This row's real, actual EndTime=NULL column
         // reserved bytes decoded to a day count outside DateTime's valid
         // range, throwing ArgumentOutOfRangeException and losing every
-        // other column in the row - misreported to the customer as "likely
+        // other column in the row - and the failure would be reported as "likely
         // a compressed row" (the decoder's generic fallback for any
-        // indexing/range exception), which was flatly wrong: the table has
-        // no compression at all, confirmed via sys.partitions.
+        // indexing/range exception), which would be wrong for an uncompressed table.
         byte[] row = Convert.FromHexString(
             "30002400010000000000000000000000001B4A0B5702000000FC663FFDE9E265AA304A0B06000802002E0035003152554E4E494E47");
 
@@ -723,10 +705,8 @@ public class RowDecoderTests
     // dbo.NewTypesTest: Id INT, TinyIntCol TINYINT, SmallIntCol SMALLINT,
     // BitCol1 BIT, BitCol2 BIT, GuidCol UNIQUEIDENTIFIER, MoneyCol MONEY,
     // SmallMoneyCol SMALLMONEY, DateTimeCol DATETIME, SmallDateTimeCol
-    // SMALLDATETIME, FloatCol FLOAT, RealCol REAL - added to close the gap
-    // found via a real customer table (DECISION.FUNDAMENTAL.MonthlyRevenue,
-    // RevenueYear SMALLINT) where every single row was lost, flagged
-    // NeedsManualReview with "system_type_id 52 is not implemented yet."
+    // SMALLDATETIME, FloatCol FLOAT, RealCol REAL - a row with a SMALLINT column
+    // must not be lost or flagged NeedsManualReview with "system_type_id 52 is not implemented yet."
     // BitCol1/BitCol2 share one LeafOffset (bit-packing, verified real: both
     // columns reported the identical leaf_offset from
     // sys.system_internals_partition_columns, distinguished only by bit

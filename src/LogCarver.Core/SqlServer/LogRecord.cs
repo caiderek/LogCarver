@@ -4,18 +4,15 @@ namespace LogCarver.Core.SqlServer;
 /// <param name="PossiblyCorruptedOffsetsInRowLogContents0">
 /// Always empty for a record read via fn_dblog (SQL Server's own
 /// log-reading code has already fixed up anything an offline byte-level
-/// reader would see corrupted). An offline reader (see
-/// LogCarverOffline's LogRecordAdapter/PartitionScanner) populates this
+/// reader would see corrupted). An offline reader populates this
 /// with the specific byte offsets - relative to the start of
 /// RowLogContents0 itself, directly usable as a position into the bytes
 /// RowDecoder.Decode receives - where it detected a physical artifact it
 /// can flag but not repair. Deliberately per-offset rather than a single
-/// bool: a whole-record flag was tried first and turned out to mark
-/// ~94% of a real customer table's events, since most rows are wide
-/// enough to have some byte somewhere touch the artifact even when the
-/// specific bytes that became a decoded value never did - see
-/// research_notes.md and RowDecoder's use of this list to flag only the
-/// specific column(s) actually affected.
+/// bool: a whole-record flag would mark most events of a table with wide rows,
+/// since some byte somewhere in the record touches the artifact even when the
+/// specific bytes that became a decoded value never did. RowDecoder uses this
+/// list to flag only the specific column(s) actually affected.
 /// </param>
 /// <param name="PossiblyCorruptedOffsetsInRowLogContents1">
 /// Same as <paramref name="PossiblyCorruptedOffsetsInRowLogContents0"/>,
