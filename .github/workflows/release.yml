@@ -1,0 +1,27 @@
+name: release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - run: dotnet test tests/LogCarver.Core.Tests -c Release
+      - run: dotnet publish src/LogCarver.Cli -c Release -r win-x64 -o out
+      - name: Checksum
+        shell: pwsh
+        run: |
+          $h = (Get-FileHash out/LogCarver.exe -Algorithm SHA256).Hash.ToLower()
+          $size = (Get-Item out/LogCarver.exe).Length
+          "sha256: $h`nsize: $size bytes" | Tee-Object -FilePath notes.txt
+      - name: Create release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" out/LogCarver.exe --title "${{ github.ref_name }}" --notes-file notes.txt
