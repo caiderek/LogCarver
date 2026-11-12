@@ -6,6 +6,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 {% seo %}
+{% if page.url != '/' and page.url != '/index.html' %}
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"LogCarver","item":"{{ "/" | absolute_url }}"},{"@type":"ListItem","position":2,"name":{{ page.title | jsonify }},"item":"{{ page.url | absolute_url }}"}]}</script>
+{% endif %}
 <link rel="stylesheet" href="assets/site.css">
 </head>
 <body>
@@ -20,6 +23,17 @@
 </header>
 <main class="page">
 {{ content }}
+{% if page.url != '/' and page.url != '/index.html' %}
+<nav class="related" aria-label="{% if zh %}相關文章{% else %}Related pages{% endif %}">
+<h2>{% if zh %}相關文章{% else %}Related pages{% endif %}</h2>
+<ul>
+{% assign others = site.pages | where_exp: "p", "p.title" | where_exp: "p", "p.url != page.url" | where_exp: "p", "p.name contains '.md'" | sort: "title" %}
+{% for p in others %}{% assign pzh = false %}{% if p.url contains 'zh-TW' %}{% assign pzh = true %}{% endif %}{% if pzh == zh and p.name != 'index.md' %}
+<li><a href="{{ p.url | remove_first: '/' }}">{{ p.title }}</a></li>
+{% endif %}{% endfor %}
+</ul>
+</nav>
+{% endif %}
 </main>
 <footer class="site-footer">
   <div class="bar">
